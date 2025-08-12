@@ -14,8 +14,8 @@ import (
 )
 
 const (
-    pluginName = "aws"
-    awsDepName = "aws"
+	pluginName = "aws"
+	awsDepName = "aws"
 )
 
 type Config struct {
@@ -84,7 +84,7 @@ func (e *Executor) Help(context.Context) (api.Message, error) {
 }
 
 // --- 필수: 실행 로직
-func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (executor.ExecuteOutput, error) {
+func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (executor.ExecuteOutput, error) { //nolint:gocritic // interface
 	// 구성 병합 (바인딩된 여러 config를 순서대로 합침)
 	var cfg Config
 	if err := mergeExecutorConfigs(in.Configs, &cfg); err != nil {
@@ -134,11 +134,15 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 	if err != nil || out.ExitCode != 0 {
 		msg := stdout
 		if stderr != "" {
-			if msg != "" { msg += "\n" }
+			if msg != "" {
+				msg += "\n"
+			}
 			msg += "STDERR:\n" + stderr
 		}
 		if err != nil {
-			if msg != "" { msg += "\n" }
+			if msg != "" {
+				msg += "\n"
+			}
 			msg += "ERROR: " + err.Error()
 		}
 		return executor.ExecuteOutput{
@@ -151,37 +155,37 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 }
 
 func mergeExecutorConfigs(configs []*executor.Config, out *Config) error {
-  // 기본값 초기화
-  if out.Env == nil {
-    out.Env = map[string]string{}
-  }
-  for _, c := range configs {
-    if c == nil || len(c.RawYAML) == 0 {
-      continue
-    }
-    var t Config
-    if err := yaml.Unmarshal(c.RawYAML, &t); err != nil {
-      return err
-    }
-    if t.DefaultRegion != "" {
-      out.DefaultRegion = t.DefaultRegion
-    }
-    if len(t.PrependArgs) > 0 {
-      out.PrependArgs = t.PrependArgs
-    }
-    if len(t.Allowed) > 0 {
-      out.Allowed = t.Allowed
-    }
-    if len(t.Env) > 0 {
-      if out.Env == nil {
-        out.Env = map[string]string{}
-      }
-      for k, v := range t.Env {
-        out.Env[k] = v
-      }
-    }
-  }
-  return nil
+	// 기본값 초기화
+	if out.Env == nil {
+		out.Env = map[string]string{}
+	}
+	for _, c := range configs {
+		if c == nil || len(c.RawYAML) == 0 {
+			continue
+		}
+		var t Config
+		if err := yaml.Unmarshal(c.RawYAML, &t); err != nil {
+			return err
+		}
+		if t.DefaultRegion != "" {
+			out.DefaultRegion = t.DefaultRegion
+		}
+		if len(t.PrependArgs) > 0 {
+			out.PrependArgs = t.PrependArgs
+		}
+		if len(t.Allowed) > 0 {
+			out.Allowed = t.Allowed
+		}
+		if len(t.Env) > 0 {
+			if out.Env == nil {
+				out.Env = map[string]string{}
+			}
+			for k, v := range t.Env {
+				out.Env[k] = v
+			}
+		}
+	}
+	return nil
 }
 
 func isAllowed(cmd string, allow []string) bool {
