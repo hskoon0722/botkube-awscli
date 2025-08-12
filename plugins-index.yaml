@@ -1,0 +1,21 @@
+entries:
+    - name: aws
+      type: executor
+      description: Run AWS CLI from chat.
+      version: 0.1.0
+      urls: []
+      jsonSchema:
+        value: |-
+            {
+              "$schema":"http://json-schema.org/draft-04/schema#",
+              "title":"aws",
+              "type":"object",
+              "properties":{
+                "defaultRegion":{"type":"string"},
+                "prependArgs":{"type":"array","items":{"type":"string"}},
+                "allowed":{"type":"array","items":{"type":"string"}},
+                "env":{"type":"object","additionalProperties":{"type":"string"}}
+              },
+              "additionalProperties": false
+            }
+      recommended: false
