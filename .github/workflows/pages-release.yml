@@ -1,4 +1,4 @@
-name: Deploy Botkube plugins to GitHub Pages
+name: Deploy Botkube plugins to GitHub Pages (page release)
 
 on:
   push:
@@ -8,7 +8,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
-  actions: read   # deploy-pages@v4가 필요로 함
+  actions: read
 
 concurrency:
   group: "pages"
@@ -41,6 +41,7 @@ jobs:
           args: build --clean --snapshot
 
       - name: Generate plugins index.yaml
+        shell: bash
         run: |
           set -euo pipefail
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
@@ -52,23 +53,7 @@ jobs:
           TYPE="executor"
           DESC="Run AWS CLI from chat."
           VERSION="0.1.0"
-          # main.go 에서 쓰신 schema 그대로 넣습니다.
-          read -r -d '' SCHEMA_JSON <<'JSON'
-          {
-            "$schema":"http://json-schema.org/draft-04/schema#",
-            "title":"aws",
-            "type":"object",
-            "properties":{
-              "defaultRegion":{"type":"string"},
-              "prependArgs":{"type":"array","items":{"type":"string"}},
-              "allowed":{"type":"array","items":{"type":"string"}},
-              "env":{"type":"object","additionalProperties":{"type":"string"}}
-            },
-            "additionalProperties": false
-          }
-          JSON
 
-          # YAML 생성
           {
             echo "entries:"
             echo "  - name: ${NAME}"
@@ -78,24 +63,36 @@ jobs:
             echo "    urls:"
             if [ -f dist/executor_aws_linux_amd64 ]; then
               cat <<EOF
-            - url: ${BASE}/executor_aws_linux_amd64
-              platform:
-                os: linux
-                architecture: amd64
-            EOF
+    - url: ${BASE}/executor_aws_linux_amd64
+      platform:
+        os: linux
+        architecture: amd64
+EOF
             fi
             if [ -f dist/executor_aws_linux_arm64 ]; then
               cat <<EOF
-            - url: ${BASE}/executor_aws_linux_arm64
-              platform:
-                os: linux
-                architecture: arm64
-            EOF
+    - url: ${BASE}/executor_aws_linux_arm64
+      platform:
+        os: linux
+        architecture: arm64
+EOF
             fi
             echo "    jsonSchema:"
-            echo "      value: |"
-            # 들여쓰기 유지하여 JSON 내보내기
-            echo "$SCHEMA_JSON" | sed 's/^/        /'
+            echo "      value: |-"
+            cat <<'JSON' | sed 's/^/        /'
+{
+  "$schema":"http://json-schema.org/draft-04/schema#",
+  "title":"aws",
+  "type":"object",
+  "properties":{
+    "defaultRegion":{"type":"string"},
+    "prependArgs":{"type":"array","items":{"type":"string"}},
+    "allowed":{"type":"array","items":{"type":"string"}},
+    "env":{"type":"object","additionalProperties":{"type":"string"}}
+  },
+  "additionalProperties": false
+}
+JSON
             echo "    recommended: false"
           } > plugins-index.yaml
 
@@ -113,7 +110,6 @@ jobs:
           </body></html>
           HTML
 
-      # v3 필요 (v1/v2는 내부적으로 upload-artifact v3를 써서 차단됨)
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

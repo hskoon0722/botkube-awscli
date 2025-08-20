@@ -1,4 +1,4 @@
-name: Deploy Botkube plugins on GitHub Release
+name: Deploy Botkube plugins on GitHub Release (release)
 
 on:
   push:
@@ -26,13 +26,16 @@ jobs:
           install-only: true
           version: latest
 
-      - name: Build plugins and generate plugins index.yaml
+      # 실제로 dist/* 만들어야 합니다
+      - name: Build plugins (snapshot)
+        run: goreleaser build --clean --snapshot
+
+      - name: Generate plugins index.yaml
+        shell: bash
         run: |
           set -euo pipefail
-
-          # pages: BASE는 깃허브 페이지용
-          # release: BASE는 릴리스 자산용
-          # (각 워크플로우에 맞게 BASE 설정만 다릅니다)
+          TAG="${GITHUB_REF#refs/tags/}"
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
 
           echo "URL BASE: $BASE"
           ls -l ./dist || true
@@ -51,37 +54,37 @@ jobs:
             echo "    urls:"
             if [ -f dist/executor_aws_linux_amd64 ]; then
               cat <<EOF
-              - url: ${BASE}/executor_aws_linux_amd64
-                platform:
-                  os: linux
-                  architecture: amd64
-          EOF
+    - url: ${BASE}/executor_aws_linux_amd64
+      platform:
+        os: linux
+        architecture: amd64
+EOF
             fi
             if [ -f dist/executor_aws_linux_arm64 ]; then
               cat <<EOF
-              - url: ${BASE}/executor_aws_linux_arm64
-                platform:
-                  os: linux
-                  architecture: arm64
-          EOF
+    - url: ${BASE}/executor_aws_linux_arm64
+      platform:
+        os: linux
+        architecture: arm64
+EOF
             fi
             echo "    jsonSchema:"
             echo "      value: |-"
-            # JSON 스키마는 heredoc -> sed 로 들여쓰기만 추가
+            # JSON은 변수에 안 넣고 바로 heredoc -> sed 로 들여쓰기만
             cat <<'JSON' | sed 's/^/        /'
-          {
-            "$schema":"http://json-schema.org/draft-04/schema#",
-            "title":"aws",
-            "type":"object",
-            "properties":{
-              "defaultRegion":{"type":"string"},
-              "prependArgs":{"type":"array","items":{"type":"string"}},
-              "allowed":{"type":"array","items":{"type":"string"}},
-              "env":{"type":"object","additionalProperties":{"type":"string"}}
-            },
-            "additionalProperties": false
-          }
-          JSON
+{
+  "$schema":"http://json-schema.org/draft-04/schema#",
+  "title":"aws",
+  "type":"object",
+  "properties":{
+    "defaultRegion":{"type":"string"},
+    "prependArgs":{"type":"array","items":{"type":"string"}},
+    "allowed":{"type":"array","items":{"type":"string"}},
+    "env":{"type":"object","additionalProperties":{"type":"string"}}
+  },
+  "additionalProperties": false
+}
+JSON
             echo "    recommended: false"
           } > plugins-index.yaml
 
@@ -112,7 +115,7 @@ jobs:
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --notes-file release.md
 
           shopt -s nullglob
-          assets=(dist/executor_* plugins-index.yaml)  # dist/source_*는 아직 없음
+          assets=(dist/executor_* plugins-index.yaml)
           if ((${#assets[@]})); then
             gh release upload "$TAG" "${assets[@]}" --clobber
           fi
