@@ -264,7 +264,7 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 		if outStr == "" {
 			return msg("ERROR: " + err.Error()), nil
 		}
-		return msg(outStr+"\nERROR: "+err.Error()), nil
+		return msg(outStr + "\nERROR: " + err.Error()), nil
 	}
 	if outStr == "" {
 		outStr = "(no output)"
