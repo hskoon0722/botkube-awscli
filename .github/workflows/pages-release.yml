@@ -46,8 +46,7 @@ jobs:
         run: |
           go run github.com/kubeshop/botkube/hack \
             -binaries-path "./dist" \
-            -url-base-path "${PLUGIN_DOWNLOAD_URL_BASE_PATH}" \
-            > plugins-index.yaml
+            -url-base-path "${PLUGIN_DOWNLOAD_URL_BASE_PATH}"
 
       - name: Prepare site files
         run: |
