@@ -43,20 +43,64 @@ jobs:
       - name: Generate plugins index.yaml
         run: |
           set -euo pipefail
-          # 안전하게 owner/repo 에서 repo 이름만 추출
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           BASE="https://${{ github.repository_owner }}.github.io/${REPO_NAME}"
           echo "URL BASE: $BASE"
           ls -l ./dist || true
 
-          # v1.14.0은 replace 문제 있으니 latest 사용
-          go run github.com/kubeshop/botkube/hack@latest \
-            -binaries-path "./dist" \
-            -url-base-path "$BASE" \
-            > plugins-index.yaml
+          NAME="aws"
+          TYPE="executor"
+          DESC="Run AWS CLI from chat."
+          VERSION="0.1.0"
+          # main.go 에서 쓰신 schema 그대로 넣습니다.
+          read -r -d '' SCHEMA_JSON <<'JSON'
+          {
+            "$schema":"http://json-schema.org/draft-04/schema#",
+            "title":"aws",
+            "type":"object",
+            "properties":{
+              "defaultRegion":{"type":"string"},
+              "prependArgs":{"type":"array","items":{"type":"string"}},
+              "allowed":{"type":"array","items":{"type":"string"}},
+              "env":{"type":"object","additionalProperties":{"type":"string"}}
+            },
+            "additionalProperties": false
+          }
+          JSON
+
+          # YAML 생성
+          {
+            echo "entries:"
+            echo "  - name: ${NAME}"
+            echo "    type: ${TYPE}"
+            echo "    description: ${DESC}"
+            echo "    version: ${VERSION}"
+            echo "    urls:"
+            if [ -f dist/executor_aws_linux_amd64 ]; then
+              cat <<EOF
+            - url: ${BASE}/executor_aws_linux_amd64
+              platform:
+                os: linux
+                architecture: amd64
+            EOF
+            fi
+            if [ -f dist/executor_aws_linux_arm64 ]; then
+              cat <<EOF
+            - url: ${BASE}/executor_aws_linux_arm64
+              platform:
+                os: linux
+                architecture: arm64
+            EOF
+            fi
+            echo "    jsonSchema:"
+            echo "      value: |"
+            # 들여쓰기 유지하여 JSON 내보내기
+            echo "$SCHEMA_JSON" | sed 's/^/        /'
+            echo "    recommended: false"
+          } > plugins-index.yaml
 
           echo "----- GENERATED INDEX -----"
-          cat plugins-index.yaml | sed -n '1,200p'
+          sed -n '1,200p' plugins-index.yaml
 
       - name: Prepare site files
         run: |
