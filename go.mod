@@ -4,6 +4,7 @@ go 1.21
 
 require (
 	github.com/MakeNowJust/heredoc v1.0.0
+	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
 	github.com/hashicorp/go-plugin v1.6.0
 	github.com/kubeshop/botkube v1.14.0
 	gopkg.in/yaml.v3 v3.0.1

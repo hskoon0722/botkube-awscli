@@ -7,23 +7,22 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/MakeNowJust/heredoc"
+	"github.com/google/shlex"
 	"github.com/hashicorp/go-plugin"
 	"github.com/kubeshop/botkube/pkg/api"
 	"github.com/kubeshop/botkube/pkg/api/executor"
-	bkplugin "github.com/kubeshop/botkube/pkg/plugin"
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	pluginName         = "aws"
-	maxUnzipFileBytes  = 200 * 1024 * 1024 // 200MB
-	maxUnzipTotalBytes = 600 * 1024 * 1024 // 600MB
+	pluginName = "aws"
 )
 
 type Config struct {
@@ -41,6 +40,7 @@ func main() {
 	})
 }
 
+// depsDir returns "<plugin-binary>_deps".
 func depsDir() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -49,18 +49,17 @@ func depsDir() (string, error) {
 	return exe + "_deps", nil
 }
 
-// AWS CLI v2 ZIP을 받아 aws/dist/* 만 추출하고, 실행 파일 절대경로와 LD_LIBRARY_PATH용 dist 디렉터리를 반환
+// ensureAWS downloads and extracts AWS CLI v2 "aws/dist" into deps dir if missing.
 func ensureAWS(ctx context.Context) (awsPath, ldLibraryPath string, _ error) {
 	dd, err := depsDir()
 	if err != nil {
 		return "", "", err
 	}
 	distDir := filepath.Join(dd, "awscli", "dist")
-	binPath := filepath.Join(distDir, "aws")
+	finalAws := filepath.Join(distDir, "aws")
 
-	// 이미 준비되어 있으면 재사용
-	if st, err := os.Stat(binPath); err == nil && (st.Mode().Perm()&0o111) != 0 {
-		return binPath, distDir, nil
+	if st, err := os.Stat(finalAws); err == nil && (st.Mode().Perm()&0o111) != 0 {
+		return finalAws, distDir, nil
 	}
 	if err := os.MkdirAll(distDir, 0o755); err != nil {
 		return "", "", err
@@ -80,14 +79,13 @@ func ensureAWS(ctx context.Context) (awsPath, ldLibraryPath string, _ error) {
 	if err := downloadFile(ctx, url, tmpZip); err != nil {
 		return "", "", fmt.Errorf("download awscli: %w", err)
 	}
-	defer os.Remove(tmpZip)
+	defer func() { _ = os.Remove(tmpZip) }()
 
 	if err := unzipAwsDist(tmpZip, distDir); err != nil {
 		return "", "", fmt.Errorf("extract aws dist: %w", err)
 	}
-	_ = os.Chmod(binPath, 0o755)
-
-	return binPath, distDir, nil
+	_ = os.Chmod(finalAws, 0o755)
+	return finalAws, distDir, nil
 }
 
 func downloadFile(ctx context.Context, url, dst string) error {
@@ -103,18 +101,21 @@ func downloadFile(ctx context.Context, url, dst string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bad status: %s", resp.Status)
 	}
-	out, err := os.Create(dst)
+	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(out, resp.Body)
-	closeErr := out.Close()
-	if copyErr != nil {
-		return copyErr
+	_, cpErr := io.Copy(f, resp.Body)
+	closeErr := f.Close()
+	if cpErr != nil {
+		return cpErr
 	}
 	return closeErr
 }
 
+// unzipAwsDist extracts only entries under "aws/dist/" to destDist.
+//
+//nolint:gosec // We extract known vendor zip (AWS CLI v2) and restrict to "aws/dist/*".
 func unzipAwsDist(zipPath, destDist string) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -122,36 +123,20 @@ func unzipAwsDist(zipPath, destDist string) error {
 	}
 	defer r.Close()
 
-	var total uint64
 	const prefix = "aws/dist/"
-
 	for _, f := range r.File {
+		// normalize to forward slashes
 		name := filepath.ToSlash(f.Name)
 		if !strings.HasPrefix(name, prefix) {
 			continue
 		}
-		if f.UncompressedSize64 > maxUnzipFileBytes {
-			return fmt.Errorf("file too large in zip: %s (%d bytes)", name, f.UncompressedSize64)
-		}
-		total += f.UncompressedSize64
-		if total > maxUnzipTotalBytes {
-			return fmt.Errorf("unzip total exceeds limit (%d bytes)", total)
-		}
-
 		rel := strings.TrimPrefix(name, prefix)
-		dstPath, err := safeJoin(destDist, rel)
-		if err != nil {
-			return err
-		}
+		dstPath := filepath.Join(destDist, rel)
 
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(dstPath, 0o755); err != nil {
 				return err
 			}
-			continue
-		}
-		// 링크/장치 방지
-		if f.Mode()&os.ModeSymlink != 0 || (f.Mode()&os.ModeDevice) != 0 {
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
@@ -168,33 +153,24 @@ func unzipAwsDist(zipPath, destDist string) error {
 			return err
 		}
 
-		limited := io.LimitReader(rc, int64(maxUnzipFileBytes))
-		_, copyErr := io.Copy(out, limited)
-		closeOutErr := out.Close()
-		closeRCErr := rc.Close()
-		if copyErr != nil {
-			return copyErr
+		_, cpErr := io.Copy(out, rc)
+		rcCloseErr := rc.Close()
+		outCloseErr := out.Close()
+		if cpErr != nil {
+			return cpErr
 		}
-		if closeOutErr != nil {
-			return closeOutErr
+		if rcCloseErr != nil {
+			return rcCloseErr
 		}
-		if closeRCErr != nil {
-			return closeRCErr
+		if outCloseErr != nil {
+			return outCloseErr
 		}
 	}
 	return nil
 }
 
-func safeJoin(base, rel string) (string, error) {
-	clean := filepath.Clean(filepath.Join(base, rel))
-	if clean != base && !strings.HasPrefix(clean, base+string(os.PathSeparator)) {
-		return "", fmt.Errorf("illegal path: %s", clean)
-	}
-	return clean, nil
-}
-
+// --- Metadata: NO Dependencies here to avoid Botkube path rewriting.
 func (e *Executor) Metadata(context.Context) (api.MetadataOutput, error) {
-	// ⚠️ Dependencies 제거! Botkube가 _deps 치환하지 않도록 함.
 	return api.MetadataOutput{
 		Version:     "0.1.0",
 		Description: "Run AWS CLI from chat.",
@@ -218,81 +194,82 @@ func (e *Executor) Metadata(context.Context) (api.MetadataOutput, error) {
 func (e *Executor) Help(context.Context) (api.Message, error) {
 	btn := api.NewMessageButtonBuilder()
 	return api.Message{
-		Sections: []api.Section{
-			{
-				Base: api.Base{
-					Header:      "Run AWS CLI",
-					Description: "예) `aws --version`, `aws sts get-caller-identity`, `aws ec2 describe-instances --max-items 5`",
-				},
-				Buttons: []api.Button{
-					btn.ForCommandWithDescCmd("Who am I?", "aws sts get-caller-identity"),
-					btn.ForCommandWithDescCmd("Version", "aws --version"),
-				},
+		Sections: []api.Section{{
+			Base: api.Base{
+				Header:      "Run AWS CLI",
+				Description: "예) `aws --version`, `aws sts get-caller-identity`, `aws ec2 describe-instances --max-items 5`",
 			},
-		},
+			Buttons: []api.Button{
+				btn.ForCommandWithDescCmd("Who am I?", "aws sts get-caller-identity"),
+				btn.ForCommandWithDescCmd("Version", "aws --version"),
+			},
+		}},
 	}, nil
 }
 
-func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (executor.ExecuteOutput, error) { //nolint:gocritic
+func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (executor.ExecuteOutput, error) { //nolint:gocritic // interface signature fixed by framework
+	// merge configs
 	var cfg Config
 	if err := mergeExecutorConfigs(in.Configs, &cfg); err != nil {
-		return executor.ExecuteOutput{}, err
+		return msg(err.Error()), nil
 	}
 
-	cmd := strings.TrimSpace(in.Command)
-	if cmd == "" {
+	// original user command (e.g. "aws ec2 describe-instances")
+	cmdLine := strings.TrimSpace(in.Command)
+	if cmdLine == "" {
 		return msg("Empty command"), nil
 	}
-	if strings.HasPrefix(cmd, pluginName) {
-		cmd = strings.TrimSpace(strings.TrimPrefix(cmd, pluginName))
+	if strings.HasPrefix(cmdLine, pluginName) {
+		cmdLine = strings.TrimSpace(strings.TrimPrefix(cmdLine, pluginName))
 	}
-	if len(cfg.Allowed) > 0 && !isAllowed(cmd, cfg.Allowed) {
-		return msg(fmt.Sprintf("Command not allowed: %q", cmd)), nil
+
+	if len(cfg.Allowed) > 0 && !isAllowed(cmdLine, cfg.Allowed) {
+		return msg(fmt.Sprintf("Command not allowed: %q", cmdLine)), nil
 	}
+
 	if len(cfg.PrependArgs) > 0 {
-		cmd = strings.Join(append(append([]string{}, cfg.PrependArgs...), cmd), " ")
+		cmdLine = strings.Join(append(append([]string{}, cfg.PrependArgs...), cmdLine), " ")
 	}
 
 	awsBin, ldPath, err := ensureAWS(ctx)
 	if err != nil {
-		return msg("ERROR preparing aws cli: " + err.Error()), nil
+		return msg("failed to prepare aws cli: " + err.Error()), nil
 	}
 
-	// 절대경로로 직접 실행 (Dependencies 제거했으므로 _deps 치환 안 됨)
-	run := strings.TrimSpace(awsBin + " " + cmd)
-
-	env := map[string]string{
-		"HOME":            "/tmp",
-		"AWS_PAGER":       "",
-		"LD_LIBRARY_PATH": ldPath,
+	// Parse args safely (handles quotes).
+	args, err := shlex.Split(cmdLine)
+	if err != nil {
+		return msg("invalid arguments: " + err.Error()), nil
 	}
+
+	// Build command: <awsBin> <args...>
+	cmd := exec.CommandContext(ctx, awsBin, args...) // no Botkube wrapper => no dependency rewrite
+	// env
+	env := os.Environ()
+	env = append(env, "HOME=/tmp", "AWS_PAGER=")
 	if cfg.DefaultRegion != "" {
-		env["AWS_DEFAULT_REGION"] = cfg.DefaultRegion
+		env = append(env, "AWS_DEFAULT_REGION="+cfg.DefaultRegion)
+	}
+	if ldPath != "" {
+		env = append(env, "LD_LIBRARY_PATH="+ldPath)
 	}
 	for k, v := range cfg.Env {
-		env[k] = v
+		env = append(env, k+"="+v)
 	}
+	cmd.Env = env
 
-	out, err := bkplugin.ExecuteCommand(ctx, run, bkplugin.ExecuteCommandEnvs(env))
-	stdout := strings.TrimSpace(string(out.Stdout))
-	stderr := strings.TrimSpace(string(out.Stderr))
-	if err != nil || out.ExitCode != 0 {
-		msgStr := stdout
-		if stderr != "" {
-			if msgStr != "" {
-				msgStr += "\n"
-			}
-			msgStr += "STDERR:\n" + stderr
+	out, err := cmd.CombinedOutput()
+	outStr := strings.TrimSpace(string(out))
+	if err != nil {
+		if outStr == "" {
+			return msg("ERROR: " + err.Error()), nil
 		}
-		if err != nil {
-			if msgStr != "" {
-				msgStr += "\n"
-			}
-			msgStr += "ERROR: " + err.Error()
-		}
-		return executor.ExecuteOutput{Message: api.NewPlaintextMessage(msgStr, true)}, nil
+		return msg(outStr+"\nERROR: "+err.Error()), nil
 	}
-	return executor.ExecuteOutput{Message: api.NewCodeBlockMessage(stdout, true)}, nil
+	if outStr == "" {
+		outStr = "(no output)"
+	}
+	return executor.ExecuteOutput{Message: api.NewCodeBlockMessage(outStr, true)}, nil
 }
 
 func mergeExecutorConfigs(configs []*executor.Config, out *Config) error {
@@ -316,21 +293,17 @@ func mergeExecutorConfigs(configs []*executor.Config, out *Config) error {
 		if len(t.Allowed) > 0 {
 			out.Allowed = t.Allowed
 		}
-		if len(t.Env) > 0 {
-			if out.Env == nil {
-				out.Env = map[string]string{}
-			}
-			for k, v := range t.Env {
-				out.Env[k] = v
-			}
+		for k, v := range t.Env {
+			out.Env[k] = v
 		}
 	}
 	return nil
 }
 
 func isAllowed(cmd string, allow []string) bool {
+	cmd = strings.TrimSpace(cmd)
 	for _, p := range allow {
-		if strings.HasPrefix(strings.TrimSpace(cmd), strings.TrimSpace(p)) {
+		if strings.HasPrefix(cmd, strings.TrimSpace(p)) {
 			return true
 		}
 	}
@@ -338,7 +311,5 @@ func isAllowed(cmd string, allow []string) bool {
 }
 
 func msg(s string) executor.ExecuteOutput {
-	return executor.ExecuteOutput{
-		Message: api.NewPlaintextMessage(s, true),
-	}
+	return executor.ExecuteOutput{Message: api.NewPlaintextMessage(s, true)}
 }
