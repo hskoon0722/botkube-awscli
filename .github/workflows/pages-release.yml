@@ -1,8 +1,9 @@
-name: Deploy Botkube plugins to GitHub Pages (page release)
+name: Pages Botkube plugins
 
 on:
   push:
-    tags: ["*"]
+    tags:
+      - "*"
 
 permissions:
   contents: read
@@ -11,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: "pages"
+  group: pages
   cancel-in-progress: true
 
 jobs:
@@ -22,17 +23,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/setup-go@v5
         with:
-          go-version-file: "go.mod"
-          cache: true
+          go-version-file: go.mod
 
       - name: Build plugins (snapshot)
         uses: goreleaser/goreleaser-action@v6
@@ -40,81 +35,64 @@ jobs:
           version: latest
           args: build --clean --snapshot
 
-      - name: Generate plugins index.yaml
+      - name: Generate plugins-index.yaml
         shell: bash
         run: |
-          set -euo pipefail
-          REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          BASE="https://${{ github.repository_owner }}.github.io/${REPO_NAME}"
-          echo "URL BASE: $BASE"
-          ls -l ./dist || true
-
+          set -Eeuo pipefail
+          REPO="${GITHUB_REPOSITORY#*/}"
+          BASE="https://${{ github.repository_owner }}.github.io/${REPO}"
           NAME="aws"
           TYPE="executor"
           DESC="Run AWS CLI from chat."
           VERSION="0.1.0"
 
           {
-            echo "entries:"
-            echo "  - name: ${NAME}"
-            echo "    type: ${TYPE}"
-            echo "    description: ${DESC}"
-            echo "    version: ${VERSION}"
-            echo "    urls:"
-            if [ -f dist/executor_aws_linux_amd64 ]; then
-              cat <<EOF
-    - url: ${BASE}/executor_aws_linux_amd64
-      platform:
-        os: linux
-        architecture: amd64
-EOF
+            printf "entries:\n"
+            printf "  - name: %s\n" "$NAME"
+            printf "    type: %s\n" "$TYPE"
+            printf "    description: %s\n" "$DESC"
+            printf "    version: %s\n" "$VERSION"
+            printf "    urls:\n"
+            if [[ -f dist/executor_aws_linux_amd64 ]]; then
+              printf "    - url: %s/executor_aws_linux_amd64\n" "$BASE"
+              printf "      platform:\n"
+              printf "        os: linux\n"
+              printf "        architecture: amd64\n"
             fi
-            if [ -f dist/executor_aws_linux_arm64 ]; then
-              cat <<EOF
-    - url: ${BASE}/executor_aws_linux_arm64
-      platform:
-        os: linux
-        architecture: arm64
-EOF
+            if [[ -f dist/executor_aws_linux_arm64 ]]; then
+              printf "    - url: %s/executor_aws_linux_arm64\n" "$BASE"
+              printf "      platform:\n"
+              printf "        os: linux\n"
+              printf "        architecture: arm64\n"
             fi
-            echo "    jsonSchema:"
-            echo "      value: |-"
-            cat <<'JSON' | sed 's/^/        /'
-{
-  "$schema":"http://json-schema.org/draft-04/schema#",
-  "title":"aws",
-  "type":"object",
-  "properties":{
-    "defaultRegion":{"type":"string"},
-    "prependArgs":{"type":"array","items":{"type":"string"}},
-    "allowed":{"type":"array","items":{"type":"string"}},
-    "env":{"type":"object","additionalProperties":{"type":"string"}}
-  },
-  "additionalProperties": false
-}
-JSON
-            echo "    recommended: false"
+            printf "    jsonSchema:\n"
+            printf "      value: |-\n"
           } > plugins-index.yaml
 
-          echo "----- GENERATED INDEX -----"
-          sed -n '1,200p' plugins-index.yaml
+          cat >> plugins-index.yaml <<'JSON'
+                {
+                  "$schema":"http://json-schema.org/draft-04/schema#",
+                  "title":"aws",
+                  "type":"object",
+                  "properties":{
+                    "defaultRegion":{"type":"string"},
+                    "prependArgs":{"type":"array","items":{"type":"string"}},
+                    "allowed":{"type":"array","items":{"type":"string"}},
+                    "env":{"type":"object","additionalProperties":{"type":"string"}}
+                  },
+                  "additionalProperties": false
+                }
+          JSON
+          echo "    recommended: false" >> plugins-index.yaml
 
-      - name: Prepare site files
-        run: |
           mkdir -p public
           cp -f dist/executor_* public/ || true
           cp -f plugins-index.yaml public/
-          cat > public/index.html <<'HTML'
-          <html><body><h1>Botkube Plugins</h1>
-          <p>See <a href="./plugins-index.yaml">plugins-index.yaml</a></p>
-          </body></html>
-          HTML
+          printf '<html><body><h1>Botkube Plugins</h1><p><a href="./plugins-index.yaml">plugins-index.yaml</a></p></body></html>' > public/index.html
 
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
-      - name: Deploy to GitHub Pages
-        id: deployment
+      - id: deployment
         uses: actions/deploy-pages@v4
