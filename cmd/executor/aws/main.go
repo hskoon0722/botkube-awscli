@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,7 +24,7 @@ import (
 const (
 	pluginName = "aws"
 
-	// gosec(G110) 예방: 해제 파일/총 용량 상한
+	// 안전한 ZIP 해제를 위한 상한
 	maxUnzipFileBytes  = 200 * 1024 * 1024 // 200MB
 	maxUnzipTotalBytes = 600 * 1024 * 1024 // 600MB
 )
@@ -31,7 +32,7 @@ const (
 type Config struct {
 	DefaultRegion string            `yaml:"defaultRegion,omitempty"`
 	PrependArgs   []string          `yaml:"prependArgs,omitempty"`
-	Allowed       []string          `yaml:"allowed,omitempty"` // "s3 ls", "ec2 describe-instances" 같은 prefix 화이트리스트
+	Allowed       []string          `yaml:"allowed,omitempty"` // "s3 ls" 같은 prefix 화이트리스트
 	Env           map[string]string `yaml:"env,omitempty"`     // 추가 환경변수
 }
 
@@ -53,7 +54,7 @@ func depsDir() (string, error) {
 }
 
 // AWS CLI v2가 없으면 내려받아 설치하고, 실행 경로와 LD_LIBRARY_PATH로 쓸 dist 경로를 돌려준다.
-func ensureAWS(ctx context.Context) (awsPath string, ldLibraryPath string, _ error) {
+func ensureAWS(ctx context.Context) (awsPath, ldLibraryPath string, _ error) {
 	dd, err := depsDir()
 	if err != nil {
 		return "", "", err
@@ -133,7 +134,7 @@ func unzipAwsDist(zipPath, destDist string) error {
 		if !strings.HasPrefix(name, prefix) {
 			continue
 		}
-		// 각 파일 상한
+		// 파일/총 용량 상한
 		if f.UncompressedSize64 > maxUnzipFileBytes {
 			return fmt.Errorf("file too large in zip: %s (%d bytes)", name, f.UncompressedSize64)
 		}
@@ -154,7 +155,7 @@ func unzipAwsDist(zipPath, destDist string) error {
 			}
 			continue
 		}
-		// (가능하면) 심볼릭 링크 배제
+		// 심볼릭 링크 배제
 		if f.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
@@ -162,21 +163,29 @@ func unzipAwsDist(zipPath, destDist string) error {
 		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 			return err
 		}
+
 		rc, err := f.Open()
 		if err != nil {
 			return err
 		}
-		func() {
-			defer rc.Close()
-			out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-			if err != nil {
-				return
-			}
-			defer out.Close()
-			// 제한된 복사 (헤더 크기 + 파일별 상한 방어)
-			lr := &io.LimitedReader{R: rc, N: int64(f.UncompressedSize64)}
-			_, _ = io.Copy(out, lr)
-		}()
+		defer rc.Close()
+
+		out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+
+		// G115: 안전한 변환 (MaxInt64 체크)
+		if f.UncompressedSize64 > uint64(math.MaxInt64) {
+			return fmt.Errorf("file too large to copy on this platform: %s (%d bytes)", name, f.UncompressedSize64)
+		}
+		n := int64(f.UncompressedSize64)
+
+		lr := &io.LimitedReader{R: rc, N: n}
+		if _, err := io.Copy(out, lr); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -232,7 +241,7 @@ func (e *Executor) Help(context.Context) (api.Message, error) {
 }
 
 // --- 실행 로직
-func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (executor.ExecuteOutput, error) { //nolint:gocritic // interface
+func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (executor.ExecuteOutput, error) { //nolint:gocritic // interface 요구 시그니처
 	// 구성 병합
 	var cfg Config
 	if err := mergeExecutorConfigs(in.Configs, &cfg); err != nil {
@@ -270,9 +279,9 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 
 	// env
 	env := map[string]string{
-		"HOME":             "/tmp", // 캐시/설정용
-		"AWS_PAGER":        "",
-		"LD_LIBRARY_PATH":  ldPath, // awscli v2의 dist
+		"HOME":            "/tmp", // 캐시/설정용
+		"AWS_PAGER":       "",
+		"LD_LIBRARY_PATH": ldPath, // awscli v2의 dist
 	}
 	if cfg.DefaultRegion != "" {
 		env["AWS_DEFAULT_REGION"] = cfg.DefaultRegion
