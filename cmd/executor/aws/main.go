@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,18 +21,16 @@ import (
 )
 
 const (
-	pluginName = "aws"
-
-	// 안전한 ZIP 해제를 위한 상한
-	maxUnzipFileBytes  = 200 * 1024 * 1024 // 200MB
-	maxUnzipTotalBytes = 600 * 1024 * 1024 // 600MB
+	pluginName         = "aws"
+	maxUnzipFileBytes  = 200 * 1024 * 1024 // 200MB: 개별 파일 상한
+	maxUnzipTotalBytes = 600 * 1024 * 1024 // 600MB: 전체 파일 상한
 )
 
 type Config struct {
 	DefaultRegion string            `yaml:"defaultRegion,omitempty"`
 	PrependArgs   []string          `yaml:"prependArgs,omitempty"`
-	Allowed       []string          `yaml:"allowed,omitempty"` // "s3 ls" 같은 prefix 화이트리스트
-	Env           map[string]string `yaml:"env,omitempty"`     // 추가 환경변수
+	Allowed       []string          `yaml:"allowed,omitempty"` // prefix 화이트리스트
+	Env           map[string]string `yaml:"env,omitempty"`
 }
 
 type Executor struct{}
@@ -44,7 +41,6 @@ func main() {
 	})
 }
 
-// 실행 파일 옆에 deps 디렉터리
 func depsDir() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -53,21 +49,19 @@ func depsDir() (string, error) {
 	return exe + "_deps", nil
 }
 
-// AWS CLI v2가 없으면 내려받아 설치하고, 실행 경로와 LD_LIBRARY_PATH로 쓸 dist 경로를 돌려준다.
+// AWS CLI v2 준비: 없으면 다운로드/설치하고, 실행 경로와 LD_LIBRARY_PATH로 쓸 dist 경로 반환
 func ensureAWS(ctx context.Context) (awsPath, ldLibraryPath string, _ error) {
 	dd, err := depsDir()
 	if err != nil {
 		return "", "", err
 	}
-
 	distDir := filepath.Join(dd, "awscli", "dist")
 	finalAws := filepath.Join(distDir, "aws")
 
-	// 이미 설치됨
+	// 이미 설치되어 있으면 그대로 사용
 	if st, err := os.Stat(finalAws); err == nil && (st.Mode().Perm()&0o111) != 0 {
 		return finalAws, distDir, nil
 	}
-
 	if err := os.MkdirAll(distDir, 0o755); err != nil {
 		return "", "", err
 	}
@@ -88,12 +82,11 @@ func ensureAWS(ctx context.Context) (awsPath, ldLibraryPath string, _ error) {
 	}
 	defer os.Remove(tmpZip)
 
-	// ZIP 안에서 "aws/dist/*" 만 distDir로 추출 (안전 checks 포함)
 	if err := unzipAwsDist(tmpZip, distDir); err != nil {
 		return "", "", fmt.Errorf("extract aws dist: %w", err)
 	}
-
 	_ = os.Chmod(finalAws, 0o755)
+
 	return finalAws, distDir, nil
 }
 
@@ -110,13 +103,17 @@ func downloadFile(ctx context.Context, url, dst string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bad status: %s", resp.Status)
 	}
+
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, resp.Body)
-	return err
+	_, copyErr := io.Copy(out, resp.Body)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 func unzipAwsDist(zipPath, destDist string) error {
@@ -134,7 +131,8 @@ func unzipAwsDist(zipPath, destDist string) error {
 		if !strings.HasPrefix(name, prefix) {
 			continue
 		}
-		// 파일/총 용량 상한
+
+		// 크기 상한 체크
 		if f.UncompressedSize64 > maxUnzipFileBytes {
 			return fmt.Errorf("file too large in zip: %s (%d bytes)", name, f.UncompressedSize64)
 		}
@@ -155,8 +153,8 @@ func unzipAwsDist(zipPath, destDist string) error {
 			}
 			continue
 		}
-		// 심볼릭 링크 배제
-		if f.Mode()&os.ModeSymlink != 0 {
+		// 심볼릭 링크/장치 파일 방지
+		if f.Mode()&os.ModeSymlink != 0 || (f.Mode()&os.ModeDevice) != 0 {
 			continue
 		}
 
@@ -168,23 +166,29 @@ func unzipAwsDist(zipPath, destDist string) error {
 		if err != nil {
 			return err
 		}
-		defer rc.Close()
 
 		out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 		if err != nil {
+			_ = rc.Close()
 			return err
 		}
-		defer out.Close()
 
-		// G115: 안전한 변환 (MaxInt64 체크)
-		if f.UncompressedSize64 > uint64(math.MaxInt64) {
-			return fmt.Errorf("file too large to copy on this platform: %s (%d bytes)", name, f.UncompressedSize64)
+		// 위험 캐스팅 없이, 고정 상한으로 제한하여 복사
+		limited := io.LimitReader(rc, int64(maxUnzipFileBytes))
+		_, copyErr := io.Copy(out, limited)
+
+		// 명시적 Close (루프 안 defer 금지)
+		closeOutErr := out.Close()
+		closeRCErr := rc.Close()
+
+		if copyErr != nil {
+			return copyErr
 		}
-		n := int64(f.UncompressedSize64)
-
-		lr := &io.LimitedReader{R: rc, N: n}
-		if _, err := io.Copy(out, lr); err != nil {
-			return err
+		if closeOutErr != nil {
+			return closeOutErr
+		}
+		if closeRCErr != nil {
+			return closeRCErr
 		}
 	}
 	return nil
@@ -199,7 +203,7 @@ func safeJoin(base, rel string) (string, error) {
 	return clean, nil
 }
 
-// --- 메타데이터 (Dependencies 제거; 런타임 ensureAWS 사용)
+// --- 메타데이터 (Dependencies는 런타임 설치를 쓰므로 비움)
 func (e *Executor) Metadata(context.Context) (api.MetadataOutput, error) {
 	return api.MetadataOutput{
 		Version:     "0.1.0",
@@ -221,7 +225,6 @@ func (e *Executor) Metadata(context.Context) (api.MetadataOutput, error) {
 	}, nil
 }
 
-// --- 도움말
 func (e *Executor) Help(context.Context) (api.Message, error) {
 	btn := api.NewMessageButtonBuilder()
 	return api.Message{
@@ -240,48 +243,37 @@ func (e *Executor) Help(context.Context) (api.Message, error) {
 	}, nil
 }
 
-// --- 실행 로직
-func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (executor.ExecuteOutput, error) { //nolint:gocritic // interface 요구 시그니처
-	// 구성 병합
+func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (executor.ExecuteOutput, error) { //nolint:gocritic // 인터페이스 요구 시그니처
 	var cfg Config
 	if err := mergeExecutorConfigs(in.Configs, &cfg); err != nil {
 		return executor.ExecuteOutput{}, err
 	}
 
-	// 원문 커맨드
 	cmd := strings.TrimSpace(in.Command)
 	if cmd == "" {
 		return msg("Empty command"), nil
 	}
-	// plugin 이름 접두어 제거
 	if strings.HasPrefix(cmd, pluginName) {
 		cmd = strings.TrimSpace(strings.TrimPrefix(cmd, pluginName))
 	}
 
-	// 화이트리스트 검사
 	if len(cfg.Allowed) > 0 && !isAllowed(cmd, cfg.Allowed) {
 		return msg(fmt.Sprintf("Command not allowed: %q", cmd)), nil
 	}
-
-	// prepend
 	if len(cfg.PrependArgs) > 0 {
 		cmd = strings.Join(append(append([]string{}, cfg.PrependArgs...), cmd), " ")
 	}
 
-	// AWS CLI 준비 (없으면 다운로드/설치)
 	awsPath, ldPath, err := ensureAWS(ctx)
 	if err != nil {
 		return msg("ERROR preparing aws cli: " + err.Error()), nil
 	}
 
-	// 절대경로로 실행
 	run := strings.TrimSpace(awsPath + " " + cmd)
-
-	// env
 	env := map[string]string{
-		"HOME":            "/tmp", // 캐시/설정용
+		"HOME":            "/tmp",
 		"AWS_PAGER":       "",
-		"LD_LIBRARY_PATH": ldPath, // awscli v2의 dist
+		"LD_LIBRARY_PATH": ldPath,
 	}
 	if cfg.DefaultRegion != "" {
 		env["AWS_DEFAULT_REGION"] = cfg.DefaultRegion
@@ -308,13 +300,9 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 			}
 			msgStr += "ERROR: " + err.Error()
 		}
-		return executor.ExecuteOutput{
-			Message: api.NewPlaintextMessage(msgStr, true),
-		}, nil
+		return executor.ExecuteOutput{Message: api.NewPlaintextMessage(msgStr, true)}, nil
 	}
-	return executor.ExecuteOutput{
-		Message: api.NewCodeBlockMessage(stdout, true),
-	}, nil
+	return executor.ExecuteOutput{Message: api.NewCodeBlockMessage(stdout, true)}, nil
 }
 
 func mergeExecutorConfigs(configs []*executor.Config, out *Config) error {
