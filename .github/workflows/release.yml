@@ -27,18 +27,22 @@ jobs:
           version: latest
 
       - name: Build plugins and generate plugins index.yaml
-        env:
-          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
         run: |
+          set -euo pipefail
           goreleaser build --clean --snapshot
-          echo "URL BASE: ${PLUGIN_DOWNLOAD_URL_BASE_PATH}"
+
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          echo "URL BASE: $BASE"
           ls -l ./dist || true
-          go run github.com/kubeshop/botkube/hack@v1.14.0 \
+
+          # v1.14.0은 replace 문제 있으니 latest 사용
+          go run github.com/kubeshop/botkube/hack@latest \
             -binaries-path "./dist" \
-            -url-base-path "${PLUGIN_DOWNLOAD_URL_BASE_PATH}" \
+            -url-base-path "$BASE" \
             > plugins-index.yaml
+
           echo "----- GENERATED INDEX -----"
-          cat plugins-index.yaml
+          cat plugins-index.yaml | sed -n '1,200p'
 
       - name: Release description
         env:

@@ -41,26 +41,28 @@ jobs:
           args: build --clean --snapshot
 
       - name: Generate plugins index.yaml
-        env:
-          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://${{ github.repository_owner }}.github.io/${{ github.event.repository_name }}"
         run: |
-          echo "URL BASE: ${PLUGIN_DOWNLOAD_URL_BASE_PATH}"
+          set -euo pipefail
+          # 안전하게 owner/repo 에서 repo 이름만 추출
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          BASE="https://${{ github.repository_owner }}.github.io/${REPO_NAME}"
+          echo "URL BASE: $BASE"
           ls -l ./dist || true
-          go run github.com/kubeshop/botkube/hack@v1.14.0 \
+
+          # v1.14.0은 replace 문제 있으니 latest 사용
+          go run github.com/kubeshop/botkube/hack@latest \
             -binaries-path "./dist" \
-            -url-base-path "${PLUGIN_DOWNLOAD_URL_BASE_PATH}" \
+            -url-base-path "$BASE" \
             > plugins-index.yaml
+
           echo "----- GENERATED INDEX -----"
-          cat plugins-index.yaml
+          cat plugins-index.yaml | sed -n '1,200p'
 
       - name: Prepare site files
         run: |
           mkdir -p public
           cp -f dist/executor_* public/ || true
-          # source_*는 아직 없으므로 생략하거나 조건부 복사
-          # cp -f dist/source_* public/ 2>/dev/null || true
           cp -f plugins-index.yaml public/
-          # 간단 안내 페이지 생성 (선택)
           cat > public/index.html <<'HTML'
           <html><body><h1>Botkube Plugins</h1>
           <p>See <a href="./plugins-index.yaml">plugins-index.yaml</a></p>
