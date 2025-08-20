@@ -49,24 +49,19 @@ func depsDir() (string, error) {
 	return exe + "_deps", nil
 }
 
-// AWS CLI v2 설치/준비 후 ldLibraryPath 반환.
-// Botkube가 항상 "<exe>_deps/<first-token>" 형태로 실행하므로
-// 첫 토큰 "aws"가 가리키도록 "<deps>/aws"를 최종적으로 만들어준다(심링크 또는 복사).
-func ensureAWS(ctx context.Context) (awsShimPath, ldLibraryPath string, _ error) {
+// AWS CLI v2 ZIP을 받아 aws/dist/* 만 추출하고, 실행 파일 절대경로와 LD_LIBRARY_PATH용 dist 디렉터리를 반환
+func ensureAWS(ctx context.Context) (awsPath, ldLibraryPath string, _ error) {
 	dd, err := depsDir()
 	if err != nil {
 		return "", "", err
 	}
 	distDir := filepath.Join(dd, "awscli", "dist")
-	finalAws := filepath.Join(distDir, "aws")
-	shimAws := filepath.Join(dd, "aws") // Botkube가 찾는 위치
+	binPath := filepath.Join(distDir, "aws")
 
-	// 이미 준비되어 있으면 바로 반환
-	if st, err := os.Stat(finalAws); err == nil && (st.Mode().Perm()&0o111) != 0 {
-		_ = ensureShimOrCopy(finalAws, shimAws)
-		return shimAws, distDir, nil
+	// 이미 준비되어 있으면 재사용
+	if st, err := os.Stat(binPath); err == nil && (st.Mode().Perm()&0o111) != 0 {
+		return binPath, distDir, nil
 	}
-
 	if err := os.MkdirAll(distDir, 0o755); err != nil {
 		return "", "", err
 	}
@@ -90,54 +85,9 @@ func ensureAWS(ctx context.Context) (awsShimPath, ldLibraryPath string, _ error)
 	if err := unzipAwsDist(tmpZip, distDir); err != nil {
 		return "", "", fmt.Errorf("extract aws dist: %w", err)
 	}
-	_ = os.Chmod(finalAws, 0o755)
+	_ = os.Chmod(binPath, 0o755)
 
-	if err := ensureShimOrCopy(finalAws, shimAws); err != nil {
-		return "", "", err
-	}
-
-	return shimAws, distDir, nil
-}
-
-func ensureShimOrCopy(src, dst string) error {
-	// 이미 존재하면서 실행 가능하면 OK
-	if st, err := os.Lstat(dst); err == nil {
-		if st.Mode()&0o111 != 0 {
-			// 심볼릭 링크면 대상이 맞는지도 한번 확인
-			if st.Mode()&os.ModeSymlink != 0 {
-				if tgt, err := os.Readlink(dst); err == nil && tgt == src {
-					return nil
-				}
-			} else {
-				return nil
-			}
-		}
-		_ = os.Remove(dst)
-	}
-	// 심볼릭 링크 시도
-	if err := os.Symlink(src, dst); err == nil {
-		return nil
-	}
-	// 심볼릭 링크 안되면 복사
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
-		_ = in.Close()
-		return err
-	}
-	_, copyErr := io.Copy(out, in)
-	closeOutErr := out.Close()
-	closeInErr := in.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	if closeOutErr != nil {
-		return closeOutErr
-	}
-	return closeInErr
+	return binPath, distDir, nil
 }
 
 func downloadFile(ctx context.Context, url, dst string) error {
@@ -244,6 +194,7 @@ func safeJoin(base, rel string) (string, error) {
 }
 
 func (e *Executor) Metadata(context.Context) (api.MetadataOutput, error) {
+	// ⚠️ Dependencies 제거! Botkube가 _deps 치환하지 않도록 함.
 	return api.MetadataOutput{
 		Version:     "0.1.0",
 		Description: "Run AWS CLI from chat.",
@@ -302,13 +253,14 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 		cmd = strings.Join(append(append([]string{}, cfg.PrependArgs...), cmd), " ")
 	}
 
-	// AWS 설치 + shim 생성(…/_deps/aws)
-	_, ldPath, err := ensureAWS(ctx)
+	awsBin, ldPath, err := ensureAWS(ctx)
 	if err != nil {
 		return msg("ERROR preparing aws cli: " + err.Error()), nil
 	}
 
-	run := strings.TrimSpace("aws " + cmd) // 절대경로 금지! Botkube가 _deps/를 앞에 붙임.
+	// 절대경로로 직접 실행 (Dependencies 제거했으므로 _deps 치환 안 됨)
+	run := strings.TrimSpace(awsBin + " " + cmd)
+
 	env := map[string]string{
 		"HOME":            "/tmp",
 		"AWS_PAGER":       "",
