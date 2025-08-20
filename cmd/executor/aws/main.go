@@ -22,14 +22,14 @@ import (
 
 const (
 	pluginName         = "aws"
-	maxUnzipFileBytes  = 200 * 1024 * 1024 // 200MB: 개별 파일 상한
-	maxUnzipTotalBytes = 600 * 1024 * 1024 // 600MB: 전체 파일 상한
+	maxUnzipFileBytes  = 200 * 1024 * 1024 // 200MB
+	maxUnzipTotalBytes = 600 * 1024 * 1024 // 600MB
 )
 
 type Config struct {
 	DefaultRegion string            `yaml:"defaultRegion,omitempty"`
 	PrependArgs   []string          `yaml:"prependArgs,omitempty"`
-	Allowed       []string          `yaml:"allowed,omitempty"` // prefix 화이트리스트
+	Allowed       []string          `yaml:"allowed,omitempty"`
 	Env           map[string]string `yaml:"env,omitempty"`
 }
 
@@ -49,19 +49,24 @@ func depsDir() (string, error) {
 	return exe + "_deps", nil
 }
 
-// AWS CLI v2 준비: 없으면 다운로드/설치하고, 실행 경로와 LD_LIBRARY_PATH로 쓸 dist 경로 반환
-func ensureAWS(ctx context.Context) (awsPath, ldLibraryPath string, _ error) {
+// AWS CLI v2 설치/준비 후 ldLibraryPath 반환.
+// Botkube가 항상 "<exe>_deps/<first-token>" 형태로 실행하므로
+// 첫 토큰 "aws"가 가리키도록 "<deps>/aws"를 최종적으로 만들어준다(심링크 또는 복사).
+func ensureAWS(ctx context.Context) (awsShimPath, ldLibraryPath string, _ error) {
 	dd, err := depsDir()
 	if err != nil {
 		return "", "", err
 	}
 	distDir := filepath.Join(dd, "awscli", "dist")
 	finalAws := filepath.Join(distDir, "aws")
+	shimAws := filepath.Join(dd, "aws") // Botkube가 찾는 위치
 
-	// 이미 설치되어 있으면 그대로 사용
+	// 이미 준비되어 있으면 바로 반환
 	if st, err := os.Stat(finalAws); err == nil && (st.Mode().Perm()&0o111) != 0 {
-		return finalAws, distDir, nil
+		_ = ensureShimOrCopy(finalAws, shimAws)
+		return shimAws, distDir, nil
 	}
+
 	if err := os.MkdirAll(distDir, 0o755); err != nil {
 		return "", "", err
 	}
@@ -87,7 +92,52 @@ func ensureAWS(ctx context.Context) (awsPath, ldLibraryPath string, _ error) {
 	}
 	_ = os.Chmod(finalAws, 0o755)
 
-	return finalAws, distDir, nil
+	if err := ensureShimOrCopy(finalAws, shimAws); err != nil {
+		return "", "", err
+	}
+
+	return shimAws, distDir, nil
+}
+
+func ensureShimOrCopy(src, dst string) error {
+	// 이미 존재하면서 실행 가능하면 OK
+	if st, err := os.Lstat(dst); err == nil {
+		if st.Mode()&0o111 != 0 {
+			// 심볼릭 링크면 대상이 맞는지도 한번 확인
+			if st.Mode()&os.ModeSymlink != 0 {
+				if tgt, err := os.Readlink(dst); err == nil && tgt == src {
+					return nil
+				}
+			} else {
+				return nil
+			}
+		}
+		_ = os.Remove(dst)
+	}
+	// 심볼릭 링크 시도
+	if err := os.Symlink(src, dst); err == nil {
+		return nil
+	}
+	// 심볼릭 링크 안되면 복사
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		_ = in.Close()
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeOutErr := out.Close()
+	closeInErr := in.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeOutErr != nil {
+		return closeOutErr
+	}
+	return closeInErr
 }
 
 func downloadFile(ctx context.Context, url, dst string) error {
@@ -103,7 +153,6 @@ func downloadFile(ctx context.Context, url, dst string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bad status: %s", resp.Status)
 	}
-
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
@@ -131,8 +180,6 @@ func unzipAwsDist(zipPath, destDist string) error {
 		if !strings.HasPrefix(name, prefix) {
 			continue
 		}
-
-		// 크기 상한 체크
 		if f.UncompressedSize64 > maxUnzipFileBytes {
 			return fmt.Errorf("file too large in zip: %s (%d bytes)", name, f.UncompressedSize64)
 		}
@@ -153,11 +200,10 @@ func unzipAwsDist(zipPath, destDist string) error {
 			}
 			continue
 		}
-		// 심볼릭 링크/장치 파일 방지
+		// 링크/장치 방지
 		if f.Mode()&os.ModeSymlink != 0 || (f.Mode()&os.ModeDevice) != 0 {
 			continue
 		}
-
 		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 			return err
 		}
@@ -166,21 +212,16 @@ func unzipAwsDist(zipPath, destDist string) error {
 		if err != nil {
 			return err
 		}
-
 		out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 		if err != nil {
 			_ = rc.Close()
 			return err
 		}
 
-		// 위험 캐스팅 없이, 고정 상한으로 제한하여 복사
 		limited := io.LimitReader(rc, int64(maxUnzipFileBytes))
 		_, copyErr := io.Copy(out, limited)
-
-		// 명시적 Close (루프 안 defer 금지)
 		closeOutErr := out.Close()
 		closeRCErr := rc.Close()
-
 		if copyErr != nil {
 			return copyErr
 		}
@@ -196,14 +237,12 @@ func unzipAwsDist(zipPath, destDist string) error {
 
 func safeJoin(base, rel string) (string, error) {
 	clean := filepath.Clean(filepath.Join(base, rel))
-	// 경로 탈출 방지
 	if clean != base && !strings.HasPrefix(clean, base+string(os.PathSeparator)) {
 		return "", fmt.Errorf("illegal path: %s", clean)
 	}
 	return clean, nil
 }
 
-// --- 메타데이터 (Dependencies는 런타임 설치를 쓰므로 비움)
 func (e *Executor) Metadata(context.Context) (api.MetadataOutput, error) {
 	return api.MetadataOutput{
 		Version:     "0.1.0",
@@ -243,7 +282,7 @@ func (e *Executor) Help(context.Context) (api.Message, error) {
 	}, nil
 }
 
-func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (executor.ExecuteOutput, error) { //nolint:gocritic // 인터페이스 요구 시그니처
+func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (executor.ExecuteOutput, error) { //nolint:gocritic
 	var cfg Config
 	if err := mergeExecutorConfigs(in.Configs, &cfg); err != nil {
 		return executor.ExecuteOutput{}, err
@@ -256,7 +295,6 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 	if strings.HasPrefix(cmd, pluginName) {
 		cmd = strings.TrimSpace(strings.TrimPrefix(cmd, pluginName))
 	}
-
 	if len(cfg.Allowed) > 0 && !isAllowed(cmd, cfg.Allowed) {
 		return msg(fmt.Sprintf("Command not allowed: %q", cmd)), nil
 	}
@@ -264,12 +302,13 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 		cmd = strings.Join(append(append([]string{}, cfg.PrependArgs...), cmd), " ")
 	}
 
-	awsPath, ldPath, err := ensureAWS(ctx)
+	// AWS 설치 + shim 생성(…/_deps/aws)
+	_, ldPath, err := ensureAWS(ctx)
 	if err != nil {
 		return msg("ERROR preparing aws cli: " + err.Error()), nil
 	}
 
-	run := strings.TrimSpace(awsPath + " " + cmd)
+	run := strings.TrimSpace("aws " + cmd) // 절대경로 금지! Botkube가 _deps/를 앞에 붙임.
 	env := map[string]string{
 		"HOME":            "/tmp",
 		"AWS_PAGER":       "",
@@ -285,7 +324,6 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 	out, err := bkplugin.ExecuteCommand(ctx, run, bkplugin.ExecuteCommandEnvs(env))
 	stdout := strings.TrimSpace(string(out.Stdout))
 	stderr := strings.TrimSpace(string(out.Stderr))
-
 	if err != nil || out.ExitCode != 0 {
 		msgStr := stdout
 		if stderr != "" {
