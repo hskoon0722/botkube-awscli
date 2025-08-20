@@ -39,13 +39,16 @@ jobs:
         uses: goreleaser/goreleaser-action@v3
         with:
           version: latest
-          args: build --rm-dist
+          args: build --clean
 
       - name: Generate plugins index.yaml
         env:
           PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://${{github.repository_owner}}.github.io/${{ github.event.repository.name }}"
         run: |
-          go run github.com/kubeshop/botkube/hack -binaries-path "./dist"
+          go run github.com/kubeshop/botkube/hack \
+            -binaries-path "./dist" \
+            -url-base-path "${PLUGIN_DOWNLOAD_URL_BASE_PATH}" \
+            > plugins-index.yaml
       - name: Release description
         env:
           PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://${{github.repository_owner}}.github.io/${{ github.event.repository.name }}"
