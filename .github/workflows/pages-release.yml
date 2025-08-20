@@ -42,11 +42,16 @@ jobs:
 
       - name: Generate plugins index.yaml
         env:
-          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://${{ github.repository_owner }}.github.io/${{ github.event.repository_name }}"
         run: |
-          go run github.com/kubeshop/botkube/hack \
+          echo "URL BASE: ${PLUGIN_DOWNLOAD_URL_BASE_PATH}"
+          ls -l ./dist || true
+          go run github.com/kubeshop/botkube/hack@v1.14.0 \
             -binaries-path "./dist" \
-            -url-base-path "${PLUGIN_DOWNLOAD_URL_BASE_PATH}"
+            -url-base-path "${PLUGIN_DOWNLOAD_URL_BASE_PATH}" \
+            > plugins-index.yaml
+          echo "----- GENERATED INDEX -----"
+          cat plugins-index.yaml
 
       - name: Prepare site files
         run: |
