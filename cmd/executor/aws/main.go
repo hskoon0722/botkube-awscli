@@ -25,14 +25,18 @@ import (
 
 const (
 	pluginName = "aws"
+
+	// 디컴프 방어 한도 (필요하면 조정)
+	maxEntryBytes   = int64(128 << 20) // 128MiB per entry
+	maxExtractBytes = int64(512 << 20) // 512MiB total
 )
 
-// 실행 시 환경변수로 덮어쓸 수 있습니다.
-//   - AWSCLI_TARBALL_URL_AMD64  (예: https://github.com/hskoon0722/botkube-awscli/releases/download/v0.0.0-rc.3/aws_linux_amd64.tar.gz)
-//   - AWSCLI_TARBALL_URL_ARM64
+// 릴리스 번들 URL (env 로 오버라이드 가능)
+//
+//	AWSCLI_TARBALL_URL_AMD64 / AWSCLI_TARBALL_URL_ARM64
 var defaultBundleURL = map[string]string{
 	"amd64": "https://github.com/hskoon0722/botkube-awscli/releases/download/v0.0.0-rc.3/aws_linux_amd64.tar.gz",
-	"arm64": "", // 필요 시 arm64 번들도 같은 방식으로 만들어서 URL 지정
+	"arm64": "", // 필요시 arm64 번들 추가
 }
 
 type Config struct {
@@ -50,7 +54,7 @@ func main() {
 	})
 }
 
-// --- 경로/다운로드 유틸
+// ---------- 공통 유틸 ----------
 
 func depsDir() (string, error) {
 	exe, err := os.Executable()
@@ -78,14 +82,33 @@ func httpGetToFile(ctx context.Context, url, dst string) error {
 		return err
 	}
 	_, cpErr := io.Copy(f, resp.Body)
-	closeErr := f.Close()
+	clErr := f.Close()
 	if cpErr != nil {
 		return cpErr
 	}
-	return closeErr
+	return clErr
 }
 
-// --- 번들(tar.gz = aws/dist + glibc/*) 우선 시도
+// base 밖으로 못 나가게 안전 조인
+func safeJoin(base, name string) (string, error) {
+	// tar: name 은 슬래시 기준이 들어올 수 있음
+	path := filepath.Join(base, name)
+	baseAbs, err := filepath.Abs(base)
+	if err != nil {
+		return "", err
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	// 동일 또는 하위 디렉토리만 허용
+	if pathAbs != baseAbs && !strings.HasPrefix(pathAbs, baseAbs+string(os.PathSeparator)) {
+		return "", fmt.Errorf("unsafe path: %s", name)
+	}
+	return pathAbs, nil
+}
+
+// ---------- 번들(tar.gz: awscli/dist + glibc/*) 우선 ----------
 
 func ensureFromBundle(ctx context.Context) (awsBin, glibcDir, distDir string, _ error) {
 	dd, err := depsDir()
@@ -99,7 +122,6 @@ func ensureFromBundle(ctx context.Context) (awsBin, glibcDir, distDir string, _ 
 
 	// 이미 준비됨?
 	if st, err := os.Stat(awsBin); err == nil && (st.Mode().Perm()&0o111) != 0 {
-		// glibc도 같이 있어야 완전
 		if _, err := os.Stat(glibcDir); err == nil {
 			return awsBin, glibcDir, distDir, nil
 		}
@@ -124,16 +146,16 @@ func ensureFromBundle(ctx context.Context) (awsBin, glibcDir, distDir string, _ 
 	}
 	defer func() { _ = os.Remove(tmp) }()
 
-	if err := untarGz(tmp, bundleRoot); err != nil {
+	if err := untarGzSafe(tmp, bundleRoot); err != nil {
 		return "", "", "", fmt.Errorf("extract bundle: %w", err)
 	}
-	// 권한 보정
+	// 실행 권한 보정
 	_ = os.Chmod(awsBin, 0o755)
 	return awsBin, glibcDir, distDir, nil
 }
 
-// tar.gz 풀기
-func untarGz(src, dst string) error {
+// tar.gz 안전 추출 (경로/사이즈 검증)
+func untarGzSafe(src, dst string) error {
 	f, err := os.Open(src)
 	if err != nil {
 		return err
@@ -147,6 +169,8 @@ func untarGz(src, dst string) error {
 	defer gz.Close()
 
 	tr := tar.NewReader(gz)
+	var extracted int64
+
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
@@ -155,37 +179,56 @@ func untarGz(src, dst string) error {
 		if err != nil {
 			return err
 		}
-		target := filepath.Join(dst, h.Name)
 
+		// 심볼릭 링크/디바이스 등은 무시
 		switch h.Typeflag {
-		case tar.TypeDir:
+		case tar.TypeDir, tar.TypeReg:
+		default:
+			continue
+		}
+
+		target, err := safeJoin(dst, h.Name)
+		if err != nil {
+			return err
+		}
+
+		if h.Typeflag == tar.TypeDir {
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
-			}
-			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(h.Mode))
-			if err != nil {
-				return err
-			}
-			_, cpErr := io.Copy(out, tr)
-			clErr := out.Close()
-			if cpErr != nil {
-				return cpErr
-			}
-			if clErr != nil {
-				return clErr
-			}
-		default:
-			// skip other types
+			continue
 		}
+
+		// 파일
+		if h.Size < 0 || h.Size > maxEntryBytes {
+			return fmt.Errorf("tar entry too large: %d bytes", h.Size)
+		}
+		if extracted+h.Size > maxExtractBytes {
+			return fmt.Errorf("tar total size exceeds limit")
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			return err
+		}
+		// 정확히 h.Size 만큼만 복사
+		_, cpErr := io.CopyN(out, tr, h.Size)
+		clErr := out.Close()
+		if cpErr != nil && cpErr != io.EOF {
+			return cpErr
+		}
+		if clErr != nil {
+			return clErr
+		}
+		extracted += h.Size
 	}
 }
 
-// --- (백업) AWS 공식 zip에서 dist만 추출 — glibc 없는 환경에서는 실패 가능
-// nolint:gosec // 신뢰 가능한 벤더(zip)에서 특정 prefix만 추출.
+// ---------- (백업) AWS 공식 zip에서 dist만 추출 (경로/사이즈 검증) ----------
+
 func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir string, _ error) {
 	dd, err := depsDir()
 	if err != nil {
@@ -225,13 +268,30 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 	defer r.Close()
 
 	const prefix = "aws/dist/"
+	var extracted uint64
+
 	for _, f := range r.File {
 		name := filepath.ToSlash(f.Name)
 		if !strings.HasPrefix(name, prefix) {
 			continue
 		}
 		rel := strings.TrimPrefix(name, prefix)
-		dstPath := filepath.Join(distDir, rel)
+		// 심링크 무시
+		if f.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		// 사이즈 제한
+		if f.UncompressedSize64 > uint64(maxEntryBytes) {
+			return "", "", "", fmt.Errorf("zip entry too large: %d bytes", f.UncompressedSize64)
+		}
+		if extracted+f.UncompressedSize64 > uint64(maxExtractBytes) {
+			return "", "", "", fmt.Errorf("zip total size exceeds limit")
+		}
+
+		dstPath, err := safeJoin(distDir, rel)
+		if err != nil {
+			return "", "", "", err
+		}
 
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(dstPath, 0o755); err != nil {
@@ -242,19 +302,22 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 			return "", "", "", err
 		}
+
 		rc, err := f.Open()
 		if err != nil {
 			return "", "", "", err
 		}
-		out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
 			_ = rc.Close()
 			return "", "", "", err
 		}
-		_, cpErr := io.Copy(out, rc)
+		// 제한 복사
+		lim := io.LimitReader(rc, int64(f.UncompressedSize64))
+		_, cpErr := io.Copy(out, lim)
 		rcCloseErr := rc.Close()
 		outCloseErr := out.Close()
-		if cpErr != nil {
+		if cpErr != nil && cpErr != io.EOF {
 			return "", "", "", cpErr
 		}
 		if rcCloseErr != nil {
@@ -263,12 +326,14 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 		if outCloseErr != nil {
 			return "", "", "", outCloseErr
 		}
+		extracted += f.UncompressedSize64
 	}
+
 	_ = os.Chmod(awsBin, 0o755)
 	return awsBin, "", distDir, nil
 }
 
-// --- Botkube 필수 인터페이스 구현
+// ---------- Botkube 인터페이스 ----------
 
 func (e *Executor) Metadata(context.Context) (api.MetadataOutput, error) {
 	return api.MetadataOutput{
@@ -288,7 +353,7 @@ func (e *Executor) Metadata(context.Context) (api.MetadataOutput, error) {
 			  "additionalProperties": false
 			}`),
 		},
-		// 주의: Dependencies 비우기 — Botkube의 경로 치환을 피하려고.
+		// Dependencies는 비워둡니다(경로 치환 회피).
 	}, nil
 }
 
@@ -328,11 +393,9 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 		cmdLine = strings.Join(append(append([]string{}, cfg.PrependArgs...), cmdLine), " ")
 	}
 
-	// 1) 번들 시도 (권장)
 	awsBin, glibcDir, distDir, err := ensureFromBundle(ctx)
 	useLoader := err == nil && glibcDir != ""
 	if err != nil {
-		// 2) 공식 zip fallback (glibc 없는 환경이면 이후 실행에서 실패할 수 있음)
 		awsBin, glibcDir, distDir, err = ensureFromOfficialZip(ctx)
 		if err != nil {
 			return msg("failed to prepare aws cli: " + err.Error()), nil
@@ -346,10 +409,8 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 
 	var cmd *exec.Cmd
 	if useLoader {
-		// ld-linux로 직접 실행
 		ld := findLoader(glibcDir)
 		if ld == "" {
-			// 혹시라도 누락되었다면 직접 실행 시도 (대개는 여기서 ENOENT)
 			cmd = exec.CommandContext(ctx, awsBin, args...)
 		} else {
 			libraryPath := glibcDir + ":" + distDir
@@ -361,14 +422,13 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 		cmd = exec.CommandContext(ctx, awsBin, args...)
 	}
 
-	// env
 	env := os.Environ()
 	env = append(env, "HOME=/tmp", "AWS_PAGER=")
 	if cfg.DefaultRegion != "" {
 		env = append(env, "AWS_DEFAULT_REGION="+cfg.DefaultRegion)
 	}
 	if distDir != "" {
-		env = append(env, "LD_LIBRARY_PATH="+distDir) // 로더 모드가 아니어도 도움 될 수 있음
+		env = append(env, "LD_LIBRARY_PATH="+distDir)
 	}
 	for k, v := range cfg.Env {
 		env = append(env, k+"="+v)
