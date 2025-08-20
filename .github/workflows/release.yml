@@ -29,33 +29,31 @@ jobs:
           version: latest
           args: build --clean --snapshot
 
-      - name: Bundle AWS CLI (deps)
-        shell: bash
+      - name: Bundle AWS CLI + glibc (amd64)
         run: |
-          set -Eeuo pipefail
-          mkdir -p dist
+          set -euo pipefail
+          work="dist/bundle_amd64"
+          rm -rf "$work" && mkdir -p "$work/awscli" "$work/glibc"
 
-          bundle() {
-            local arch="$1" url zip tmp
-            if [[ "$arch" == "amd64" ]]; then
-              url="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
-            else
-              url="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip"
-            fi
+          # 1) AWS CLI v2 다운 및 dist만 복사
+          curl -sSL -o /tmp/awscli.zip https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+          unzip -q /tmp/awscli.zip -d /tmp/awscli
+          cp -a /tmp/awscli/aws/dist "$work/awscli/"
 
-            tmp="$(mktemp -d)"
-            curl -fsSL "$url" -o "$tmp/awscli.zip"
-            unzip -q "$tmp/awscli.zip" -d "$tmp"
+          # 2) aws 바이너리가 요구하는 so들과 인터프리터(로더) 수집
+          bin="$work/awscli/dist/aws"
+          ldd "$bin" | tee /tmp/ldd.txt
+          # 인터프리터 경로(예: /lib64/ld-linux-x86-64.so.2)
+          interp="$(awk '/ld-linux/ {print $3} /interpreter/ {print $1}' /tmp/ldd.txt | head -n1)"
+          cp -L "$interp" "$work/glibc/"
 
-            # 실행 파일만 뽑아 tar.gz 로 묶습니다(파일명: aws)
-            install -m 0755 "$tmp/aws/dist/aws" "$tmp/aws"
-            tar -C "$tmp" -czf "dist/aws_linux_${arch}.tar.gz" aws
-          }
+          # 필요 so 복사
+          awk '{print $3}' /tmp/ldd.txt | grep -E '^/' | while read -r so; do
+            cp -L "$so" "$work/glibc/"
+          done
 
-          bundle amd64
-          bundle arm64
-
-          ls -l dist/aws_linux_*.tar.gz
+          # 3) 번들 tar.gz 생성
+          tar -C "$work" -czf dist/aws_linux_amd64.tar.gz awscli glibc
 
       # 릴리즈 자산을 가리키는 index 생성 (정확한 들여쓰기 보장)
       - name: Generate plugins-index.yaml
