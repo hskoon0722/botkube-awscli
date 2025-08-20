@@ -4,6 +4,13 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"archive/zip"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"time"
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/hashicorp/go-plugin"
@@ -31,6 +38,128 @@ func main() {
 	executor.Serve(map[string]plugin.Plugin{
 		pluginName: &executor.Plugin{Executor: &Executor{}},
 	})
+}
+
+func depsDir() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return exe + "_deps", nil
+}
+
+
+func ensureAWS(ctx context.Context) (awsPath string, ldLibraryPath string, _ error) {
+	dd, err := depsDir()
+	if err != nil {
+		return "", "", err
+	}
+	// 우리가 실제로 사용할 바이너리와 라이브러리 위치
+	distDir := filepath.Join(dd, "awscli", "dist")
+	finalAws := filepath.Join(distDir, "aws")
+
+	// 이미 설치되어 있으면 그대로 사용
+	if st, err := os.Stat(finalAws); err == nil && st.Mode().Perm()&0o111 != 0 {
+		return finalAws, distDir, nil
+	}
+
+	// 없으면 내려받기
+	if err := os.MkdirAll(distDir, 0o755); err != nil {
+		return "", "", err
+	}
+
+	var url string
+	switch runtime.GOARCH {
+	case "amd64":
+		url = "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+	case "arm64":
+		url = "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip"
+	default:
+		return "", "", fmt.Errorf("unsupported arch: %s", runtime.GOARCH)
+	}
+
+	tmpZip := filepath.Join(os.TempDir(), fmt.Sprintf("awscliv2-%d.zip", time.Now().UnixNano()))
+	if err := downloadFile(ctx, url, tmpZip); err != nil {
+		return "", "", fmt.Errorf("download awscli: %w", err)
+	}
+	defer os.Remove(tmpZip)
+
+	// ZIP 안에서 "aws/dist/*" 만 distDir로 추출
+	if err := unzipAwsDist(tmpZip, distDir); err != nil {
+		return "", "", fmt.Errorf("extract aws dist: %w", err)
+	}
+
+	// 실행 권한 보장
+	_ = os.Chmod(finalAws, 0o755)
+	return finalAws, distDir, nil
+}
+
+
+func downloadFile(ctx context.Context, url, dst string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("bad status: %s", resp.Status)
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
+func unzipAwsDist(zipPath, destDist string) error {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	const prefix = "aws/dist/"
+	for _, f := range r.File {
+		name := f.Name
+		// 윈도우/맥 압축 차이 방지용 정규화
+		name = filepath.ToSlash(name)
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		rel := strings.TrimPrefix(name, prefix)
+		dstPath := filepath.Join(destDist, rel)
+
+		if f.FileInfo().IsDir() {
+			if err := os.MkdirAll(dstPath, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+			return err
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		func() {
+			defer rc.Close()
+			out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+			if err != nil {
+				rc.Close()
+				return
+			}
+			defer out.Close()
+			_, err = io.Copy(out, rc)
+		}()
+	}
+	return nil
 }
 
 // --- 필수: 메타데이터 + 의존성(AWS CLI 바이너리)
