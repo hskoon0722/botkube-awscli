@@ -29,31 +29,55 @@ jobs:
           version: latest
           args: build --clean --snapshot
 
-      - name: Bundle AWS CLI + glibc (amd64)
+      - name: Build AWS CLI bundle (amd64)
+        shell: bash
         run: |
           set -euo pipefail
-          work="dist/bundle_amd64"
-          rm -rf "$work" && mkdir -p "$work/awscli" "$work/glibc"
+          work="$(pwd)"
+          BUNDLE_DIR="${work}/bundle_amd64"
+          rm -rf "$BUNDLE_DIR"
+          mkdir -p "$BUNDLE_DIR"/{awscli,glibc}
 
-          # 1) AWS CLI v2 다운 및 dist만 복사
-          curl -sSL -o /tmp/awscli.zip https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
-          unzip -q /tmp/awscli.zip -d /tmp/awscli
-          cp -a /tmp/awscli/aws/dist "$work/awscli/"
+          # aws 공식 zip 다운로드 및 dist/aws만 꺼내기
+          curl -fsSL -o /tmp/awscli.zip https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+          rm -rf /tmp/awszip
+          mkdir -p /tmp/awszip
+          unzip -q /tmp/awscli.zip -d /tmp/awszip
+          cp -a /tmp/awszip/aws/dist "$BUNDLE_DIR/awscli/"
+          AWSBIN="$BUNDLE_DIR/awscli/dist/aws"
+          chmod +x "$AWSBIN"
 
-          # 2) aws 바이너리가 요구하는 so들과 인터프리터(로더) 수집
-          bin="$work/awscli/dist/aws"
-          ldd "$bin" | tee /tmp/ldd.txt
-          # 인터프리터 경로(예: /lib64/ld-linux-x86-64.so.2)
-          interp="$(awk '/ld-linux/ {print $3} /interpreter/ {print $1}' /tmp/ldd.txt | head -n1)"
-          cp -L "$interp" "$work/glibc/"
+          echo "== ldd =="
+          ldd "$AWSBIN" || true
 
-          # 필요 so 복사
-          awk '{print $3}' /tmp/ldd.txt | grep -E '^/' | while read -r so; do
-            cp -L "$so" "$work/glibc/"
+          # 일반 so 경로 수집 ('=> path' 또는 첫 컬럼에 절대경로인 경우 모두 처리)
+          mapfile -t LIBS < <(ldd "$AWSBIN" | awk '/=>/ {print $3} !/=>/ {print $1}' | awk 'NF')
+          for lib in "${LIBS[@]}"; do
+            # vdso는 스킵
+            [[ "$lib" == "linux-vdso.so.1" ]] && continue
+            # 절대경로만 복사
+            if [[ "$lib" = /* ]]; then
+              cp -Lv "$lib" "$BUNDLE_DIR/glibc/" || true
+            fi
           done
 
-          # 3) 번들 tar.gz 생성
-          tar -C "$work" -czf dist/aws_linux_amd64.tar.gz awscli glibc
+          # 동적 로더 경로 (ldd 마지막 줄 형식 커버)
+          LOADER="$(ldd "$AWSBIN" | awk '/ld-linux/ {print $1}' | head -n1 || true)"
+          if [[ -z "${LOADER:-}" || ! -e "$LOADER" ]]; then
+            # 일반적인 위치들 탐색(우분투 24.04 러너 호환)
+            for cand in /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2; do
+              if [[ -e "$cand" ]]; then LOADER="$cand"; break; fi
+            done
+          fi
+          if [[ -z "${LOADER:-}" || ! -e "$LOADER" ]]; then
+            echo "::error::Dynamic loader not found"; exit 1
+          fi
+          cp -Lv "$LOADER" "$BUNDLE_DIR/glibc/"
+
+          # 번들 패키징
+          mkdir -p dist
+          tar -C "$BUNDLE_DIR" -czf dist/aws_linux_amd64.tar.gz awscli glibc
+          echo "Created dist/aws_linux_amd64.tar.gz"
 
       # 릴리즈 자산을 가리키는 index 생성 (정확한 들여쓰기 보장)
       - name: Generate plugins-index.yaml
@@ -61,80 +85,75 @@ jobs:
         run: |
           set -Eeuo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"   # v0.1.1 -> 0.1.1
           BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
-          echo "URL BASE: $BASE"
-          ls -l dist || true
 
           NAME="aws"
           TYPE="executor"
           DESC="Run AWS CLI from chat."
-          VERSION="0.1.0"
 
-          {
-            printf "entries:\n"
-            printf "  - name: %s\n" "$NAME"
-            printf "    type: %s\n" "$TYPE"
-            printf "    description: %s\n" "$DESC"
-            printf "    version: %s\n" "$VERSION"
-            printf "    urls:\n"
-            if [[ -f dist/executor_aws_linux_amd64 ]]; then
-              printf "      - url: %s/executor_aws_linux_amd64\n" "$BASE"
-              printf "        platform:\n"
-              printf "          os: linux\n"
-              printf "          architecture: amd64\n"
-            fi
-            if [[ -f dist/executor_aws_linux_arm64 ]]; then
-              printf "      - url: %s/executor_aws_linux_arm64\n" "$BASE"
-              printf "        platform:\n"
-              printf "          os: linux\n"
-              printf "          architecture: arm64\n"
-            fi
-            printf "    jsonSchema:\n"
-            printf "      value: |-\n"
-          } > plugins-index.yaml
+          : > plugins-index.yaml
 
-          # JSON 본문은 8칸 들여쓰기 적용
-          sed 's/^/        /' >> plugins-index.yaml <<'JSON'
-          {
-            "$schema":"http://json-schema.org/draft-04/schema#",
-            "title":"aws",
-            "type":"object",
-            "properties":{
-              "defaultRegion":{"type":"string"},
-              "prependArgs":{"type":"array","items":{"type":"string"}},
-              "allowed":{"type":"array","items":{"type":"string"}},
-              "env":{"type":"object","additionalProperties":{"type":"string"}}
-            },
-            "additionalProperties": false
-          }
-          JSON
+          # header
+          printf "entries:\n"                                   >> plugins-index.yaml
+          printf "  - name: %s\n"            "$NAME"            >> plugins-index.yaml
+          printf "    type: %s\n"            "$TYPE"            >> plugins-index.yaml
+          printf "    description: %s\n"     "$DESC"            >> plugins-index.yaml
+          printf "    version: %s\n"         "$VERSION"         >> plugins-index.yaml
+          printf "    urls:\n"                                   >> plugins-index.yaml
 
-          echo "    recommended: false" >> plugins-index.yaml
+          # executor binaries (conditional)
+          if [[ -f dist/executor_aws_linux_amd64 ]]; then
+            printf "      - url: %s/executor_aws_linux_amd64\n" "$BASE" >> plugins-index.yaml
+            printf "        platform:\n"                         >> plugins-index.yaml
+            printf "          os: linux\n"                      >> plugins-index.yaml
+            printf "          architecture: amd64\n"            >> plugins-index.yaml
+          fi
+          if [[ -f dist/executor_aws_linux_arm64 ]]; then
+            printf "      - url: %s/executor_aws_linux_arm64\n" "$BASE" >> plugins-index.yaml
+            printf "        platform:\n"                         >> plugins-index.yaml
+            printf "          os: linux\n"                      >> plugins-index.yaml
+            printf "          architecture: arm64\n"            >> plugins-index.yaml
+          fi
 
-          {
-            printf "    dependencies:\n"
-            printf "      - name: aws\n"
-            printf "        urls:\n"
-            printf "          - url: %s/aws_linux_amd64.tar.gz//aws\n" "$BASE"
-            printf "            platform:\n"
-            printf "              os: linux\n"
-            printf "              architecture: amd64\n"
-            printf "          - url: %s/aws_linux_arm64.tar.gz//aws\n" "$BASE"
-            printf "            platform:\n"
-            printf "              os: linux\n"
-            printf "              architecture: arm64\n"
-          } >> plugins-index.yaml
+          # jsonSchema
+          printf "    jsonSchema:\n"                            >> plugins-index.yaml
+          printf "      value: |-\\n"                           >> plugins-index.yaml
+          printf "        {\\n"                                 >> plugins-index.yaml
+          printf "          \\\"$schema\\\":\\\"http://json-schema.org/draft-04/schema#\\\",\\n" >> plugins-index.yaml
+          printf "          \\\"title\\\":\\\"aws\\\",\\n"      >> plugins-index.yaml
+          printf "          \\\"type\\\":\\\"object\\\",\\n"    >> plugins-index.yaml
+          printf "          \\\"properties\\\":{\\n"            >> plugins-index.yaml
+          printf "            \\\"defaultRegion\\\":{\\\"type\\\":\\\"string\\\"},\\n" >> plugins-index.yaml
+          printf "            \\\"prependArgs\\\":{\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"type\\\":\\\"string\\\"}},\\n" >> plugins-index.yaml
+          printf "            \\\"allowed\\\":{\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"type\\\":\\\"string\\\"}},\\n" >> plugins-index.yaml
+          printf "            \\\"env\\\":{\\\"type\\\":\\\"object\\\",\\\"additionalProperties\\\":{\\\"type\\\":\\\"string\\\"}}\\n" >> plugins-index.yaml
+          printf "          },\\n"                              >> plugins-index.yaml
+          printf "          \\\"additionalProperties\\\": false\\n" >> plugins-index.yaml
+          printf "        }\\n"                                 >> plugins-index.yaml
 
-          echo "----- GENERATED INDEX -----"
+          # recommended
+          printf "    recommended: false\n"                     >> plugins-index.yaml
+
+          # dependencies (정확히 aws 바이너리만 추출하도록 내부 경로 + archive 명시)
+          printf "    dependencies:\\n"                         >> plugins-index.yaml
+          printf "      - name: aws\\n"                         >> plugins-index.yaml
+          printf "        urls:\\n"                             >> plugins-index.yaml
+          printf "          - url: %s/aws_linux_amd64.tar.gz//awscli/dist/aws?archive=tar.gz\\n" "$BASE" >> plugins-index.yaml
+          printf "            platform:\\n"                     >> plugins-index.yaml
+          printf "              os: linux\\n"                   >> plugins-index.yaml
+          printf "              architecture: amd64\\n"         >> plugins-index.yaml
+          printf "          - url: %s/aws_linux_arm64.tar.gz//awscli/dist/aws?archive=tar.gz\\n" "$BASE" >> plugins-index.yaml
+          printf "            platform:\\n"                     >> plugins-index.yaml
+          printf "              os: linux\\n"                   >> plugins-index.yaml
+          printf "              architecture: arm64\\n"         >> plugins-index.yaml
+
+          # 출력 & YAML 검증
           sed -n '1,200p' plugins-index.yaml
-
-          # (안전장치) YAML 파싱 확인: 여기서 실패하면 봇까지 안 갑니다.
           python3 - <<'PY'
-          import yaml, sys
-          with open('plugins-index.yaml', 'rb') as f:
-              yaml.safe_load(f)
-          print('YAML looks valid.')
+          import yaml; yaml.safe_load(open('plugins-index.yaml','rb')); print('YAML looks valid.')
           PY
+
 
       - name: Create or update GitHub release
         env:

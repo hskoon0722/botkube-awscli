@@ -312,13 +312,17 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 			_ = rc.Close()
 			return "", "", "", err
 		}
-		// 제한 복사
-		lim := io.LimitReader(rc, int64(f.UncompressedSize64))
-		_, cpErr := io.Copy(out, lim)
+		// 제한 복사: 항목 최대크기(maxEntryBytes)만큼만 허용
+		n, cpErr := io.Copy(out, io.LimitReader(rc, maxEntryBytes))
 		rcCloseErr := rc.Close()
 		outCloseErr := out.Close()
 		if cpErr != nil && cpErr != io.EOF {
 			return "", "", "", cpErr
+		}
+		if uint64(n) != f.UncompressedSize64 {
+			return "", "", "", fmt.Errorf(
+				"zip entry size mismatch: copied=%d want=%d (%s)",
+				n, f.UncompressedSize64, rel)
 		}
 		if rcCloseErr != nil {
 			return "", "", "", rcCloseErr
@@ -337,7 +341,7 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 
 func (e *Executor) Metadata(context.Context) (api.MetadataOutput, error) {
 	return api.MetadataOutput{
-		Version:     "0.1.0",
+		Version:     "0.1.1",
 		Description: "Run AWS CLI from chat.",
 		JSONSchema: api.JSONSchema{
 			Value: heredoc.Doc(`{
