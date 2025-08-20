@@ -1,28 +1,31 @@
-name: Release Botkube plugins
+name: Deploy Botkube plugins on GitHub Release (release)
 
 on:
   push:
-    tags:
-      - "*"
-
-permissions:
-  contents: write
+    tags: ["*"]
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: 'go.mod'
+          cache: true
 
-      # dist/* 생성
+      # dist/* 생성 (snapshot 모드면 semver 검증 경고만 나고 계속 진행됩니다)
       - name: Build plugins (snapshot)
         uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
+          distribution: goreleaser
           args: build --clean --snapshot
 
       - name: Generate plugins-index.yaml
@@ -31,10 +34,10 @@ jobs:
           set -Eeuo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
           BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
-          NAME="aws"
-          TYPE="executor"
-          DESC="Run AWS CLI from chat."
-          VERSION="0.1.0"
+          echo "URL BASE: $BASE"
+          ls -l ./dist || true
+
+          NAME="aws"; TYPE="executor"; DESC="Run AWS CLI from chat."; VERSION="0.1.0"
 
           {
             printf "entries:\n"
@@ -43,48 +46,71 @@ jobs:
             printf "    description: %s\n" "$DESC"
             printf "    version: %s\n" "$VERSION"
             printf "    urls:\n"
-            if [[ -f dist/executor_aws_linux_amd64 ]]; then
-              printf "    - url: %s/executor_aws_linux_amd64\n" "$BASE"
-              printf "      platform:\n"
-              printf "        os: linux\n"
-              printf "        architecture: amd64\n"
-            fi
-            if [[ -f dist/executor_aws_linux_arm64 ]]; then
-              printf "    - url: %s/executor_aws_linux_arm64\n" "$BASE"
-              printf "      platform:\n"
-              printf "        os: linux\n"
-              printf "        architecture: arm64\n"
-            fi
+            [[ -f dist/executor_aws_linux_amd64 ]] && {
+              printf "      - url: %s/executor_aws_linux_amd64\n" "$BASE"
+              printf "        platform:\n"
+              printf "          os: linux\n"
+              printf "          architecture: amd64\n"
+            }
+            [[ -f dist/executor_aws_linux_arm64 ]] && {
+              printf "      - url: %s/executor_aws_linux_arm64\n" "$BASE"
+              printf "        platform:\n"
+              printf "          os: linux\n"
+              printf "          architecture: arm64\n"
+            }
             printf "    jsonSchema:\n"
             printf "      value: |-\n"
           } > plugins-index.yaml
 
-          cat >> plugins-index.yaml <<'JSON'
-                {
-                  "$schema":"http://json-schema.org/draft-04/schema#",
-                  "title":"aws",
-                  "type":"object",
-                  "properties":{
-                    "defaultRegion":{"type":"string"},
-                    "prependArgs":{"type":"array","items":{"type":"string"}},
-                    "allowed":{"type":"array","items":{"type":"string"}},
-                    "env":{"type":"object","additionalProperties":{"type":"string"}}
-                  },
-                  "additionalProperties": false
-                }
+          # JSON 본문은 8칸 들여쓰기
+          sed 's/^/        /' >> plugins-index.yaml <<'JSON'
+          {
+            "$schema":"http://json-schema.org/draft-04/schema#",
+            "title":"aws",
+            "type":"object",
+            "properties":{
+              "defaultRegion":{"type":"string"},
+              "prependArgs":{"type":"array","items":{"type":"string"}},
+              "allowed":{"type":"array","items":{"type":"string"}},
+              "env":{"type":"object","additionalProperties":{"type":"string"}}
+            },
+            "additionalProperties": false
+          }
           JSON
+
           echo "    recommended: false" >> plugins-index.yaml
 
           echo "----- GENERATED INDEX -----"
           sed -n '1,200p' plugins-index.yaml
 
-      - name: Create GitHub release & upload assets
+      - name: Release description
+        env:
+          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
+        run: |
+          cat << EOF > release.md
+          Botkube Plugins **${GITHUB_REF#refs/tags/}** are now available!
+          To use them:
+          ```yaml
+          plugins:
+            repositories:
+              ${{ github.event.repository.name }}:
+                url: ${PLUGIN_DOWNLOAD_URL_BASE_PATH}/plugins-index.yaml
+          ```
+          EOF
+
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          set -Eeuo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --notes "Botkube plugins ${TAG}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --notes-file release.md
+
           shopt -s nullglob
-          gh release upload "$TAG" dist/executor_* plugins-index.yaml --clobber
+          assets=(dist/executor_* plugins-index.yaml)
+          if ((${#assets[@]})); then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            echo "No assets to upload." >&2
+            exit 1
+          fi
