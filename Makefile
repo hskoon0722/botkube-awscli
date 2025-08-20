@@ -3,11 +3,11 @@
 ############
 
 build-plugins: ## Builds all plugins for all defined platforms
-	goreleaser build --rm-dist --snapshot
+	goreleaser build --clean --snapshot
 .PHONY: build-plugins
 
 build-plugins-single: ## Builds all plugins only for current GOOS and GOARCH.
-	goreleaser build --rm-dist --single-target --snapshot
+	goreleaser build --clean --single-target --snapshot
 .PHONY: build-plugins-single
 
 ##############
@@ -15,7 +15,10 @@ build-plugins-single: ## Builds all plugins only for current GOOS and GOARCH.
 ##############
 
 gen-plugin-index: ## Generate plugins YAML index file.
-	go run github.com/kubeshop/botkube/hack -binaries-path "./dist" -use-archive=false
+	go run github.com/kubeshop/botkube/hack \
+	  -binaries-path "./dist" \
+	  -url-base-path "${PLUGIN_DOWNLOAD_URL_BASE_PATH}" \
+	  > plugins-index.yaml
 .PHONY: gen-plugin-index
 
 ###############
