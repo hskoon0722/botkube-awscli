@@ -2,27 +2,26 @@ name: Deploy Botkube plugins on GitHub Release
 
 on:
   push:
-    tags:
-      - '*'
+    tags: ["*"]
 
 jobs:
   release:
-    name: Release
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
           cache: true
 
       - name: Install GoReleaser
-        uses: goreleaser/goreleaser-action@v3
+        uses: goreleaser/goreleaser-action@v6
         with:
           install-only: true
           version: latest
@@ -31,41 +30,37 @@ jobs:
         env:
           PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
         run: |
-          make build-plugins || goreleaser build --clean
+          goreleaser build --clean --snapshot
           go run github.com/kubeshop/botkube/hack \
             -binaries-path "./dist" \
             -url-base-path "${PLUGIN_DOWNLOAD_URL_BASE_PATH}" \
             > plugins-index.yaml
+
       - name: Release description
         env:
           PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
         run: |
           cat << EOF > release.md
-
-          Botkube Plugins **${GITHUB_REF#refs/tags/}** version are now available! :rocket:
-
-          To use plugins from this release, configure Botkube with:
-          EOF
-          cat << 'EOF' >> release.md
-
+          Botkube Plugins **${GITHUB_REF#refs/tags/}** are now available!
+          To use them:
           ```yaml
           plugins:
             repositories:
-          EOF
-          cat << EOF >> release.md
               ${{ github.event.repository.name }}:
                 url: ${PLUGIN_DOWNLOAD_URL_BASE_PATH}/plugins-index.yaml
-          EOF
-          cat << 'EOF' >> release.md
           ```
           EOF
 
-      - name: Publish GitHub release
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          gh release create "${GITHUB_REF#refs/tags/}" \
-          --notes-file release.md \
-          ./dist/source_* \
-          ./dist/executor_* \
-          ./plugins-index.yaml
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --notes-file release.md
+
+          shopt -s nullglob
+          assets=(dist/executor_* plugins-index.yaml)  # dist/source_*는 아직 없음
+          if ((${#assets[@]})); then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          fi

@@ -2,100 +2,73 @@ name: Deploy Botkube plugins to GitHub Pages
 
 on:
   push:
-    tags:
-      - "*"
+    tags: ["*"]
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
   contents: read
   pages: write
   id-token: write
+  actions: read   # deploy-pages@v4가 필요로 함
 
-# Allow one concurrent deployment
 concurrency:
   group: "pages"
   cancel-in-progress: true
 
 jobs:
-  # Single deploy job since we're just deploying
   deploy:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
       - name: Setup Pages
-        uses: actions/configure-pages@v2
+        uses: actions/configure-pages@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
           go-version-file: "go.mod"
           cache: true
 
-      - name: Build plugins binaries
-        uses: goreleaser/goreleaser-action@v3
+      - name: Build plugins (snapshot)
+        uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
           args: build --clean --snapshot
 
       - name: Generate plugins index.yaml
         env:
-          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://${{github.repository_owner}}.github.io/${{ github.event.repository.name }}"
+          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
         run: |
           go run github.com/kubeshop/botkube/hack \
             -binaries-path "./dist" \
             -url-base-path "${PLUGIN_DOWNLOAD_URL_BASE_PATH}" \
             > plugins-index.yaml
-      - name: Release description
-        env:
-          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://${{github.repository_owner}}.github.io/${{ github.event.repository.name }}"
+
+      - name: Prepare site files
         run: |
-          cat << EOF > README.md
+          mkdir -p public
+          cp -f dist/executor_* public/ || true
+          # source_*는 아직 없으므로 생략하거나 조건부 복사
+          # cp -f dist/source_* public/ 2>/dev/null || true
+          cp -f plugins-index.yaml public/
+          # 간단 안내 페이지 생성 (선택)
+          cat > public/index.html <<'HTML'
+          <html><body><h1>Botkube Plugins</h1>
+          <p>See <a href="./plugins-index.yaml">plugins-index.yaml</a></p>
+          </body></html>
+          HTML
 
-          Botkube Plugins **${GITHUB_REF#refs/tags/}** version are now available! :rocket:
-
-          To use plugins from this release, configure Botkube with:
-          EOF
-          cat << 'EOF' >> README.md
-
-          ```yaml
-          plugins:
-            repositories:
-          EOF
-          cat << EOF >> README.md
-              ${{ github.event.repository.name }}:
-                url: ${PLUGIN_DOWNLOAD_URL_BASE_PATH}/plugins-index.yaml
-          EOF
-          cat << 'EOF' >> README.md
-          ```
-          EOF
-
-      - name: Render Markdown
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api \
-            --method POST \
-            -H "Accept: application/vnd.github+json" \
-            /markdown \
-            -f text="$(cat ./README.md)" > index.html
-
-      - name: Publish GitHub release
-        run: |
-          mkdir public
-          mv dist/executor_* public/
-          mv dist/source_* public/
-          mv plugins-index.yaml public/
-          mv index.html public/
-
+      # v3 필요 (v1/v2는 내부적으로 upload-artifact v3를 써서 차단됨)
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v1
+        uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v1
+        uses: actions/deploy-pages@v4
