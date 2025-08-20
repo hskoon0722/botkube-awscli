@@ -1,14 +1,16 @@
-name: Deploy Botkube plugins on GitHub Release (release)
+name: Deploy Botkube plugins on GitHub Release
 
 on:
   push:
-    tags: ["*"]
+    tags:
+      - "*"
+
+permissions:
+  contents: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout
@@ -17,17 +19,17 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
+          go-version-file: go.mod
           cache: true
 
-      # dist/* 생성 (snapshot 모드면 semver 검증 경고만 나고 계속 진행됩니다)
-      - name: Build plugins (snapshot)
+      # 실제로 dist/ 아래 실행파일을 빌드합니다 (스냅샷 이름: executor_aws_linux_*)
+      - name: Build plugins
         uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
-          distribution: goreleaser
           args: build --clean --snapshot
 
+      # 릴리즈 자산을 가리키는 index 생성 (정확한 들여쓰기 보장)
       - name: Generate plugins-index.yaml
         shell: bash
         run: |
@@ -35,9 +37,12 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
           echo "URL BASE: $BASE"
-          ls -l ./dist || true
+          ls -l dist || true
 
-          NAME="aws"; TYPE="executor"; DESC="Run AWS CLI from chat."; VERSION="0.1.0"
+          NAME="aws"
+          TYPE="executor"
+          DESC="Run AWS CLI from chat."
+          VERSION="0.1.0"
 
           {
             printf "entries:\n"
@@ -62,7 +67,7 @@ jobs:
             printf "      value: |-\n"
           } > plugins-index.yaml
 
-          # JSON 본문은 8칸 들여쓰기 해서 붙입니다.
+          # JSON 본문은 8칸 들여쓰기 적용
           sed 's/^/        /' >> plugins-index.yaml <<'JSON'
           {
             "$schema":"http://json-schema.org/draft-04/schema#",
@@ -83,42 +88,25 @@ jobs:
           echo "----- GENERATED INDEX -----"
           sed -n '1,200p' plugins-index.yaml
 
-          # (선택) YAML 유효성 검사: 여기서 실패하면 Botkube까지 가지 않음
+          # (안전장치) YAML 파싱 확인: 여기서 실패하면 봇까지 안 갑니다.
           python3 - <<'PY'
-          import sys, yaml
-          with open('plugins-index.yaml', 'r', encoding='utf-8') as f:
+          import yaml, sys
+          with open('plugins-index.yaml', 'rb') as f:
               yaml.safe_load(f)
           print('YAML looks valid.')
           PY
-
-      - name: Release description
-        env:
-          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
-        run: |
-          cat << EOF > release.md
-          Botkube Plugins **${GITHUB_REF#refs/tags/}** are now available!
-          To use them:
-          ```yaml
-          plugins:
-            repositories:
-              ${{ github.event.repository.name }}:
-                url: ${PLUGIN_DOWNLOAD_URL_BASE_PATH}/plugins-index.yaml
-          ```
-          EOF
 
       - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          set -Eeuo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --notes-file release.md
+          # 릴리즈가 없으면 만들고, 있으면 그대로 진행
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" -t "$TAG" -n "Botkube plugins $TAG"
+          # 자산 업로드 (덮어쓰기 허용)
+          gh release upload "$TAG" dist/executor_* plugins-index.yaml --clobber
 
-          shopt -s nullglob
-          assets=(dist/executor_* plugins-index.yaml)
-          if ((${#assets[@]})); then
-            gh release upload "$TAG" "${assets[@]}" --clobber
-          else
-            echo "No assets to upload." >&2
-            exit 1
-          fi
+      - name: Show index URL
+        run: echo "Index URL => https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF#refs/tags/}/plugins-index.yaml"
