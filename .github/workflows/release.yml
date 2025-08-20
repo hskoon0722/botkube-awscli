@@ -29,6 +29,34 @@ jobs:
           version: latest
           args: build --clean --snapshot
 
+      - name: Bundle AWS CLI (deps)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+
+          bundle() {
+            local arch="$1" url zip tmp
+            if [[ "$arch" == "amd64" ]]; then
+              url="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+            else
+              url="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip"
+            fi
+
+            tmp="$(mktemp -d)"
+            curl -fsSL "$url" -o "$tmp/awscli.zip"
+            unzip -q "$tmp/awscli.zip" -d "$tmp"
+
+            # 실행 파일만 뽑아 tar.gz 로 묶습니다(파일명: aws)
+            install -m 0755 "$tmp/aws/dist/aws" "$tmp/aws"
+            tar -C "$tmp" -czf "dist/aws_linux_${arch}.tar.gz" aws
+          }
+
+          bundle amd64
+          bundle arm64
+
+          ls -l dist/aws_linux_*.tar.gz
+
       # 릴리즈 자산을 가리키는 index 생성 (정확한 들여쓰기 보장)
       - name: Generate plugins-index.yaml
         shell: bash
@@ -85,6 +113,20 @@ jobs:
 
           echo "    recommended: false" >> plugins-index.yaml
 
+          {
+            printf "    dependencies:\n"
+            printf "      - name: aws\n"
+            printf "        urls:\n"
+            printf "          - url: %s/aws_linux_amd64.tar.gz//aws\n" "$BASE"
+            printf "            platform:\n"
+            printf "              os: linux\n"
+            printf "              architecture: amd64\n"
+            printf "          - url: %s/aws_linux_arm64.tar.gz//aws\n" "$BASE"
+            printf "            platform:\n"
+            printf "              os: linux\n"
+            printf "              architecture: arm64\n"
+          } >> plugins-index.yaml
+
           echo "----- GENERATED INDEX -----"
           sed -n '1,200p' plugins-index.yaml
 
@@ -101,12 +143,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          set -Eeuo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
-          # 릴리즈가 없으면 만들고, 있으면 그대로 진행
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" -t "$TAG" -n "Botkube plugins $TAG"
-          # 자산 업로드 (덮어쓰기 허용)
-          gh release upload "$TAG" dist/executor_* plugins-index.yaml --clobber
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --notes-file release.md
+
+          shopt -s nullglob
+          assets=(dist/executor_* dist/aws_linux_*.tar.gz plugins-index.yaml)
+          if ((${#assets[@]})); then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          fi
 
       - name: Show index URL
         run: echo "Index URL => https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF#refs/tags/}/plugins-index.yaml"
