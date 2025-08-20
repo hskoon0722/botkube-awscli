@@ -46,23 +46,23 @@ jobs:
             printf "    description: %s\n" "$DESC"
             printf "    version: %s\n" "$VERSION"
             printf "    urls:\n"
-            [[ -f dist/executor_aws_linux_amd64 ]] && {
+            if [[ -f dist/executor_aws_linux_amd64 ]]; then
               printf "      - url: %s/executor_aws_linux_amd64\n" "$BASE"
               printf "        platform:\n"
               printf "          os: linux\n"
               printf "          architecture: amd64\n"
-            }
-            [[ -f dist/executor_aws_linux_arm64 ]] && {
+            fi
+            if [[ -f dist/executor_aws_linux_arm64 ]]; then
               printf "      - url: %s/executor_aws_linux_arm64\n" "$BASE"
               printf "        platform:\n"
               printf "          os: linux\n"
               printf "          architecture: arm64\n"
-            }
+            fi
             printf "    jsonSchema:\n"
             printf "      value: |-\n"
           } > plugins-index.yaml
 
-          # JSON 본문은 8칸 들여쓰기
+          # JSON 본문은 8칸 들여쓰기 해서 붙입니다.
           sed 's/^/        /' >> plugins-index.yaml <<'JSON'
           {
             "$schema":"http://json-schema.org/draft-04/schema#",
@@ -82,6 +82,14 @@ jobs:
 
           echo "----- GENERATED INDEX -----"
           sed -n '1,200p' plugins-index.yaml
+
+          # (선택) YAML 유효성 검사: 여기서 실패하면 Botkube까지 가지 않음
+          python3 - <<'PY'
+          import sys, yaml
+          with open('plugins-index.yaml', 'r', encoding='utf-8') as f:
+              yaml.safe_load(f)
+          print('YAML looks valid.')
+          PY
 
       - name: Release description
         env:
