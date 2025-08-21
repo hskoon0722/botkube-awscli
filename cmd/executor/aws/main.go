@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"math"
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/google/shlex"
@@ -334,7 +335,10 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 		if outCloseErr != nil {
 			return "", "", "", outCloseErr
 		}
-		if uint64(n) != entrySize {
+		if entrySize > uint64(math.MaxInt64) {
+			return "", "", "", fmt.Errorf("zip entry too large for this platform: %d", entrySize)
+		}
+		if n != int64(entrySize) {
 			return "", "", "", fmt.Errorf("zip entry size mismatch: copied=%d want=%d (%s)", n, entrySize, rel)
 		}
 
