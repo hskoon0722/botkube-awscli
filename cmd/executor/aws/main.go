@@ -380,64 +380,30 @@ func (e *Executor) Help(context.Context) (api.Message, error) {
 		btn.ForCommandWithDescCmd("Who am I?", "aws sts get-caller-identity"),
 		btn.ForCommandWithDescCmd("Version", "aws --version"),
 	}
-
 	// Compute
 	compute := []api.Button{
-		btn.ForCommandWithDescCmd("EC2 instances (5)", "aws ec2 describe-instances --max-results 5"),
-		btn.ForCommandWithDescCmd("ASGs (10)", "aws autoscaling describe-auto-scaling-groups --max-items 10"),
+		btn.ForCommandWithDescCmd("EC2 instances", "aws ec2 describe-instances"),
 		btn.ForCommandWithDescCmd("EKS clusters", "aws eks list-clusters"),
 		btn.ForCommandWithDescCmd("ECS clusters", "aws ecs list-clusters"),
-		btn.ForCommandWithDescCmd("Lambda functions (10)", "aws lambda list-functions --max-items 10"),
+		btn.ForCommandWithDescCmd("Lambda functions", "aws lambda list-functions"),
 	}
-
 	// Storage
 	storage := []api.Button{
 		btn.ForCommandWithDescCmd("S3 buckets", "aws s3api list-buckets"),
-		btn.ForCommandWithDescCmd("EBS volumes (10)", "aws ec2 describe-volumes --max-results 10"),
-		btn.ForCommandWithDescCmd("EFS filesystems", "aws efs describe-file-systems"),
-		btn.ForCommandWithDescCmd("FSx filesystems", "aws fsx describe-file-systems"),
-		btn.ForCommandWithDescCmd("Backups (10)", "aws backup list-backup-plans --max-results 10"),
 	}
-
 	// Database
 	database := []api.Button{
-		btn.ForCommandWithDescCmd("RDS instances (20)", "aws rds describe-db-instances --max-records 20"),
-		btn.ForCommandWithDescCmd("DynamoDB tables (20)", "aws dynamodb list-tables --max-items 20"),
+		btn.ForCommandWithDescCmd("RDS instances", "aws rds describe-db-instances"),
+		btn.ForCommandWithDescCmd("DynamoDB tables", "aws dynamodb list-tables"),
 		btn.ForCommandWithDescCmd("ElastiCache clusters", "aws elasticache describe-cache-clusters"),
-		btn.ForCommandWithDescCmd("Redshift clusters", "aws redshift describe-clusters"),
 	}
-
 	// Networking
 	network := []api.Button{
 		btn.ForCommandWithDescCmd("VPCs", "aws ec2 describe-vpcs"),
-		btn.ForCommandWithDescCmd("Subnets (50)", "aws ec2 describe-subnets --max-results 50"),
-		btn.ForCommandWithDescCmd("Security groups (50)", "aws ec2 describe-security-groups --max-results 50"),
-		btn.ForCommandWithDescCmd("Route tables (50)", "aws ec2 describe-route-tables --max-results 50"),
-		btn.ForCommandWithDescCmd("VPC Endpoints (50)", "aws ec2 describe-vpc-endpoints --max-results 50"),
+		btn.ForCommandWithDescCmd("Subnets", "aws ec2 describe-subnets"),
 	}
-
-	// Monitoring & Logging
-	monitoring := []api.Button{
-		btn.ForCommandWithDescCmd("CW metrics (namespaces)", "aws cloudwatch list-metrics --recently-active PT3H --max-items 50"),
-		btn.ForCommandWithDescCmd("Log groups (50)", "aws logs describe-log-groups --limit 50"),
-		btn.ForCommandWithDescCmd("X-Ray groups", "aws xray get-group --group-name default"), // 예시
-	}
-
-	// Security & Compliance
-	security := []api.Button{
-		btn.ForCommandWithDescCmd("IAM roles (100)", "aws iam list-roles --max-items 100"),
-		btn.ForCommandWithDescCmd("Config recorders", "aws configservice describe-configuration-recorders"),
-		btn.ForCommandWithDescCmd("CloudTrail trails", "aws cloudtrail list-trails"),
-	}
-
-	// ⚠️ 제한적 Update (정책에 맞춰 극히 보수적으로)
-	// 클릭 즉시 실행되므로 파라미터가 필요한 것들은 안내 문구 포함
 	updates := []api.Button{
-		btn.ForCommandWithDescCmd("ASG StartInstanceRefresh (필요: ASG 이름)",
-			"aws autoscaling start-instance-refresh --auto-scaling-group-name <asg-name>"),
-		btn.ForCommandWithDescCmd("EKS UpdateNodegroupVersion (필요: cluster/nodegroup)",
-			"aws eks update-nodegroup-version --cluster-name <cluster> --nodegroup-name <nodegroup> --version <k8s-version>"),
-		btn.ForCommandWithDescCmd("EC2 RebootInstances (제한됨: black 태그)",
+		btn.ForCommandWithDescCmd("EC2 RebootInstances",
 			"aws ec2 reboot-instances --instance-ids <i-xxxxxxxxxxxxxxxxx>"),
 	}
 
@@ -451,33 +417,25 @@ func (e *Executor) Help(context.Context) (api.Message, error) {
 				Buttons: identity,
 			},
 			{
-				Base:    api.Base{Header: "Compute (Describe/List/Get)"},
+				Base:    api.Base{Header: "Compute (예시)"},
 				Buttons: compute,
 			},
 			{
-				Base:    api.Base{Header: "Storage (Describe/List/Get)"},
+				Base:    api.Base{Header: "Storage (예시)"},
 				Buttons: storage,
 			},
 			{
-				Base:    api.Base{Header: "Database (Describe/List/Get)"},
+				Base:    api.Base{Header: "Database (예시)"},
 				Buttons: database,
 			},
 			{
-				Base:    api.Base{Header: "Networking (Describe/List/Get)"},
+				Base:    api.Base{Header: "Networking (예시)"},
 				Buttons: network,
-			},
-			{
-				Base:    api.Base{Header: "Monitoring & Logging"},
-				Buttons: monitoring,
-			},
-			{
-				Base:    api.Base{Header: "Security & Compliance"},
-				Buttons: security,
 			},
 			{
 				Base: api.Base{
 					Header:      "Limited Update operations",
-					Description: "클릭 즉시 실행됩니다. 필요한 파라미터(이름/버전/인스턴스ID 등)를 **반드시** 채워 넣으세요. 정책으로 호출이 제한될 수 있습니다.",
+					Description: "정책으로 인한 호출이 제한될 수 있습니다.",
 				},
 				Buttons: updates,
 			},
