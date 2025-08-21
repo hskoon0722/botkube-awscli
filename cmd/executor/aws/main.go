@@ -618,19 +618,6 @@ func runAWS(ctx context.Context, ld, awsBin, libraryPath string, args, env []str
 	return cmd.CombinedOutput()
 }
 
-func findLoader(glibcDir string) string {
-	candidates := []string{
-		filepath.Join(glibcDir, "ld-linux-x86-64.so.2"),
-		filepath.Join(glibcDir, "ld-linux-aarch64.so.1"),
-	}
-	for _, p := range candidates {
-		if st, err := os.Stat(p); err == nil && (st.Mode().Perm()&0o111) != 0 {
-			return p
-		}
-	}
-	return ""
-}
-
 func mergeExecutorConfigs(configs []*executor.Config, out *Config) error {
 	if out.Env == nil {
 		out.Env = map[string]string{}
