@@ -27,7 +27,7 @@ import (
 const (
 	pluginName = "aws"
 
-	// 디컴프 방어 한도 (필요하면 조정)
+	// 디컴프 방어 한도
 	maxEntryBytes   = int64(128 << 20) // 128MiB per entry
 	maxExtractBytes = int64(512 << 20) // 512MiB total
 )
@@ -36,7 +36,7 @@ const (
 // AWSCLI_TARBALL_URL_AMD64 / AWSCLI_TARBALL_URL_ARM64
 var defaultBundleURL = map[string]string{
 	"amd64": "https://github.com/hskoon0722/botkube-awscli/releases/download/v0.0.0-rc.3/aws_linux_amd64.tar.gz",
-	"arm64": "", // 필요시 arm64 번들 추가
+	"arm64": "",
 }
 
 type Config struct {
@@ -50,7 +50,7 @@ type Executor struct{}
 
 func main() {
 	executor.Serve(map[string]plugin.Plugin{
-		pluginName: &executor.Plugin{Executor: &Executor{}},
+		pluginName: {Executor: &Executor{}},
 	})
 }
 
@@ -144,20 +144,20 @@ func ensureFromBundle(ctx context.Context) (awsBin, glibcDir, distDir string, _ 
 	}
 	defer func() { _ = os.Remove(tmp) }()
 
-    if err := untarGzSafe(tmp, bundleRoot); err != nil {
-        return "", "", "", fmt.Errorf("extract bundle: %w", err)
-    }
+	if err := untarGzSafe(tmp, bundleRoot); err != nil {
+		return "", "", "", fmt.Errorf("extract bundle: %w", err)
+	}
 
-    _ = os.Chmod(awsBin, 0o755)
-    for _, ld := range []string{
-        filepath.Join(glibcDir, "ld-linux-x86-64.so.2"),
-        filepath.Join(glibcDir, "ld-linux-aarch64.so.1"),
-    } {
-        if _, err := os.Stat(ld); err == nil {
-            _ = os.Chmod(ld, 0o755)
-        }
-    }
-    return awsBin, glibcDir, distDir, nil
+	_ = os.Chmod(awsBin, 0o755)
+	for _, ld := range []string{
+		filepath.Join(glibcDir, "ld-linux-x86-64.so.2"),
+		filepath.Join(glibcDir, "ld-linux-aarch64.so.1"),
+	} {
+		if _, err := os.Stat(ld); err == nil {
+			_ = os.Chmod(ld, 0o755)
+		}
+	}
+	return awsBin, glibcDir, distDir, nil
 }
 
 // tar.gz 안전 추출 (경로/사이즈 검증)
@@ -230,7 +230,7 @@ func untarGzSafe(src, dst string) error {
 	}
 }
 
-// ---------- (백업) AWS 공식 zip에서 dist만 추출 (경로/사이즈 검증) ----------
+// ---------- (백업) AWS 공식 zip에서 dist만 추출 ----------
 
 func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir string, _ error) {
 	dd, err := depsDir()
@@ -284,7 +284,6 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 			continue
 		}
 
-		// uint64 -> int64 안전 변환
 		if f.UncompressedSize64 > math.MaxInt64 {
 			return "", "", "", fmt.Errorf("zip entry too large for this platform: %d", f.UncompressedSize64)
 		}
@@ -321,7 +320,6 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 			return "", "", "", err
 		}
 
-		// 정확히 want 바이트만 복사 (과도한 입력 차단)
 		_, cpErr := io.CopyN(out, rc, want)
 		rcCloseErr := rc.Close()
 		outCloseErr := out.Close()
@@ -414,41 +412,68 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 		return msg("invalid arguments: " + err.Error()), nil
 	}
 
-	var cmd *exec.Cmd
+	// 로더 탐색 (기본 + 글롭 백업)
+	ld := ""
 	if useLoader {
-		ld := findLoader(glibcDir)
-		if ld == "" {
-			cmd = exec.CommandContext(ctx, awsBin, args...)
-		} else {
-			libraryPath := glibcDir + ":" + distDir
-			loaderArgs := []string{"--library-path", libraryPath, awsBin}
-			loaderArgs = append(loaderArgs, args...)
-			cmd = exec.CommandContext(ctx, ld, loaderArgs...)
+		ld = findLoader(glibcDir)
+		if ld == "" && glibcDir != "" {
+			if cands, _ := filepath.Glob(filepath.Join(glibcDir, "ld-linux-*.so.*")); len(cands) > 0 {
+				ld = cands[0]
+				_ = os.Chmod(ld, 0o755)
+			}
 		}
-	} else {
-		cmd = exec.CommandContext(ctx, awsBin, args...)
 	}
 
+	// env 구성 (LD_LIBRARY_PATH = glibcDir:distDir)
 	env := os.Environ()
 	env = append(env, "HOME=/tmp", "AWS_PAGER=")
 	if cfg.DefaultRegion != "" {
 		env = append(env, "AWS_DEFAULT_REGION="+cfg.DefaultRegion)
 	}
-	if distDir != "" {
-		env = append(env, "LD_LIBRARY_PATH="+distDir)
+	if glibcDir != "" || distDir != "" {
+		lp := ""
+		if glibcDir != "" {
+			lp = glibcDir
+		}
+		if distDir != "" {
+			if lp != "" {
+				lp += ":"
+			}
+			lp += distDir
+		}
+		env = append(env, "LD_LIBRARY_PATH="+lp)
 	}
 	for k, v := range cfg.Env {
 		env = append(env, k+"="+v)
+	}
+
+	var cmd *exec.Cmd
+	if useLoader && ld != "" {
+		// 로더 경유 실행 (가장 확실)
+		libraryPath := glibcDir
+		if distDir != "" {
+			if libraryPath != "" {
+				libraryPath += ":"
+			}
+			libraryPath += distDir
+		}
+		loaderArgs := append([]string{"--library-path", libraryPath, awsBin}, args...)
+		cmd = exec.CommandContext(ctx, ld, loaderArgs...)
+	} else {
+		// 로더가 없으면 LD_LIBRARY_PATH만으로 시도
+		cmd = exec.CommandContext(ctx, awsBin, args...)
 	}
 	cmd.Env = env
 
 	out, err := cmd.CombinedOutput()
 	outStr := strings.TrimSpace(string(out))
 	if err != nil {
+		dbg := fmt.Sprintf("DBG useLoader=%t ld=%q aws=%q glibcDir=%q distDir=%q",
+			useLoader, ld, awsBin, glibcDir, distDir)
 		if outStr == "" {
-			return msg("ERROR: " + err.Error()), nil
+			return msg(dbg + "\nERROR: " + err.Error()), nil
 		}
-		return msg(outStr + "\nERROR: " + err.Error()), nil
+		return msg(dbg + "\n" + outStr + "\nERROR: " + err.Error()), nil
 	}
 	if outStr == "" {
 		outStr = "(no output)"
