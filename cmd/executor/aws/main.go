@@ -493,109 +493,129 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 
 	raw := strings.TrimSpace(in.Command)
 	lower := strings.ToLower(raw)
-
-	// 1) help 라우팅: 빈 입력 / "aws" / "aws help" / "help" 는 Help() 출력
+	// help 라우팅
 	if lower == "" || lower == pluginName || lower == pluginName+" help" || lower == "help" {
 		h, _ := e.Help(ctx)
 		return executor.ExecuteOutput{Message: h}, nil
 	}
 
-	cmdLine := raw
-	if strings.HasPrefix(strings.ToLower(cmdLine), pluginName) {
-		cmdLine = strings.TrimSpace(cmdLine[len(pluginName):])
-	}
-
-	// 2) 허용 패턴 검사 (help 라우팅 이후에 수행)
+	// 접두어 제거 + allowed 체크 + prepend 적용
+	cmdLine := normalizeCmd(raw)
 	if len(cfg.Allowed) > 0 && !isAllowed(cmdLine, cfg.Allowed) {
 		return msg(fmt.Sprintf("Command not allowed: %q", cmdLine)), nil
 	}
-
-	// 3) prependArgs 적용
 	if len(cfg.PrependArgs) > 0 {
 		cmdLine = strings.Join(append(append([]string{}, cfg.PrependArgs...), cmdLine), " ")
 	}
-
-	awsBin, glibcDir, distDir, err := ensureFromBundle(ctx)
-	useLoader := err == nil && glibcDir != ""
-	if err != nil {
-		awsBin, glibcDir, distDir, err = ensureFromOfficialZip(ctx)
-		if err != nil {
-			return msg("failed to prepare aws cli: " + err.Error()), nil
-		}
-	}
-
 	args, err := shlex.Split(cmdLine)
 	if err != nil {
 		return msg("invalid arguments: " + err.Error()), nil
 	}
 
-	// 로더 탐색 (기본 + 글롭 백업)
-	ld := ""
-	if useLoader {
-		ld = findLoader(glibcDir)
-		if ld == "" && glibcDir != "" {
-			if cands, _ := filepath.Glob(filepath.Join(glibcDir, "ld-linux-*.so.*")); len(cands) > 0 {
-				ld = cands[0]
-				_ = os.Chmod(ld, 0o755)
-			}
-		}
-	}
-
-	// env 구성 (LD_LIBRARY_PATH = glibcDir:distDir)
-	env := os.Environ()
-	env = append(env, "HOME=/tmp", "AWS_PAGER=")
-	if cfg.DefaultRegion != "" {
-		env = append(env, "AWS_DEFAULT_REGION="+cfg.DefaultRegion)
-	}
-	if glibcDir != "" || distDir != "" {
-		lp := ""
-		if glibcDir != "" {
-			lp = glibcDir
-		}
-		if distDir != "" {
-			if lp != "" {
-				lp += ":"
-			}
-			lp += distDir
-		}
-		env = append(env, "LD_LIBRARY_PATH="+lp)
-	}
-	for k, v := range cfg.Env {
-		env = append(env, k+"="+v)
-	}
-
-	var cmd *exec.Cmd
-	if useLoader && ld != "" {
-		// 로더 경유 실행 (가장 확실)
-		libraryPath := glibcDir
-		if distDir != "" {
-			if libraryPath != "" {
-				libraryPath += ":"
-			}
-			libraryPath += distDir
-		}
-		loaderArgs := append([]string{"--library-path", libraryPath, awsBin}, args...)
-		cmd = exec.CommandContext(ctx, ld, loaderArgs...)
-	} else {
-		// 로더가 없으면 LD_LIBRARY_PATH만으로 시도
-		cmd = exec.CommandContext(ctx, awsBin, args...)
-	}
-	cmd.Env = env
-
-	out, err := cmd.CombinedOutput()
-	outStr := strings.TrimSpace(string(out))
+	// AWS 바이너리/로더 준비
+	awsBin, glibcDir, distDir, err := prepareAws(ctx)
 	if err != nil {
-		dbg := fmt.Sprintf("DBG useLoader=%t ld=%q aws=%q glibcDir=%q distDir=%q",
-			useLoader, ld, awsBin, glibcDir, distDir)
+		return msg("failed to prepare aws cli: " + err.Error()), nil
+	}
+	ld := resolveLoaderPath(glibcDir)
+	libraryPath := buildLDPath(glibcDir, distDir)
+	env := buildEnv(cfg, libraryPath)
+
+	// 실행
+	out, runErr := runAWS(ctx, ld, awsBin, libraryPath, args, env)
+	outStr := strings.TrimSpace(string(out))
+	if runErr != nil {
+		dbg := fmt.Sprintf(
+			"DBG useLoader=%t ld=%q aws=%q glibcDir=%q distDir=%q",
+			ld != "", ld, awsBin, glibcDir, distDir,
+		)
 		if outStr == "" {
-			return msg(dbg + "\nERROR: " + err.Error()), nil
+			return msg(dbg + "\nERROR: " + runErr.Error()), nil
 		}
-		return msg(dbg + "\n" + outStr + "\nERROR: " + err.Error()), nil
+		return msg(dbg + "\n" + outStr + "\nERROR: " + runErr.Error()), nil
 	}
 	if outStr == "" {
 		outStr = "(no output)"
 	}
 	return executor.ExecuteOutput{Message: api.NewCodeBlockMessage(outStr, true)}, nil
+}
+
+func normalizeCmd(raw string) string {
+	cmd := strings.TrimSpace(raw)
+	if strings.HasPrefix(strings.ToLower(cmd), pluginName) {
+		return strings.TrimSpace(cmd[len(pluginName):])
+	}
+	return cmd
+}
+
+func prepareAws(ctx context.Context) (awsBin, glibcDir, distDir string, _ error) {
+	awsBin, glibcDir, distDir, err := ensureFromBundle(ctx)
+	if err == nil {
+		return awsBin, glibcDir, distDir, nil
+	}
+	// 폴백: 공식 zip (glibcDir 없음, 로더 없이 LD_LIBRARY_PATH만 사용)
+	return ensureFromOfficialZip(ctx)
+}
+
+func resolveLoaderPath(glibcDir string) string {
+	if glibcDir == "" {
+		return ""
+	}
+	candidates := []string{
+		filepath.Join(glibcDir, "ld-linux-x86-64.so.2"),
+		filepath.Join(glibcDir, "ld-linux-aarch64.so.1"),
+	}
+	for _, p := range candidates {
+		if st, err := os.Stat(p); err == nil && (st.Mode().Perm()&0o111) != 0 {
+			return p
+		}
+	}
+	// 와일드카드 백업
+	if cands, _ := filepath.Glob(filepath.Join(glibcDir, "ld-linux-*.so.*")); len(cands) > 0 {
+		_ = os.Chmod(cands[0], 0o755)
+		return cands[0]
+	}
+	return ""
+}
+
+func buildLDPath(glibcDir, distDir string) string {
+	switch {
+	case glibcDir != "" && distDir != "":
+		return glibcDir + ":" + distDir
+	case glibcDir != "":
+		return glibcDir
+	case distDir != "":
+		return distDir
+	default:
+		return ""
+	}
+}
+
+func buildEnv(cfg Config, ldPath string) []string {
+	env := os.Environ()
+	env = append(env, "HOME=/tmp", "AWS_PAGER=")
+	if cfg.DefaultRegion != "" {
+		env = append(env, "AWS_DEFAULT_REGION="+cfg.DefaultRegion)
+	}
+	if ldPath != "" {
+		env = append(env, "LD_LIBRARY_PATH="+ldPath)
+	}
+	for k, v := range cfg.Env {
+		env = append(env, k+"="+v)
+	}
+	return env
+}
+
+func runAWS(ctx context.Context, ld, awsBin, libraryPath string, args, env []string) ([]byte, error) {
+	var cmd *exec.Cmd
+	if ld != "" {
+		loaderArgs := append([]string{"--library-path", libraryPath, awsBin}, args...)
+		cmd = exec.CommandContext(ctx, ld, loaderArgs...)
+	} else {
+		cmd = exec.CommandContext(ctx, awsBin, args...)
+	}
+	cmd.Env = env
+	return cmd.CombinedOutput()
 }
 
 func findLoader(glibcDir string) string {
