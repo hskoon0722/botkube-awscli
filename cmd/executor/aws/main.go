@@ -50,7 +50,7 @@ type Executor struct{}
 
 func main() {
 	executor.Serve(map[string]plugin.Plugin{
-		pluginName: &executor.Plugin{Executor: &Executor{}}, 
+		pluginName: &executor.Plugin{Executor: &Executor{}},
 	})
 }
 
