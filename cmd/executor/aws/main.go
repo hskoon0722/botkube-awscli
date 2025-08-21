@@ -232,6 +232,7 @@ func untarGzSafe(src, dst string) error {
 
 // ---------- (백업) AWS 공식 zip에서 dist만 추출 ----------
 
+// ---------- (백업) AWS 공식 zip에서 dist만 추출 ----------
 func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir string, _ error) {
 	dd, err := depsDir()
 	if err != nil {
@@ -271,7 +272,7 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 	defer r.Close()
 
 	const prefix = "aws/dist/"
-	var extracted int64
+	var extracted uint64 // 전체 추출 누적 바이트(== uint64로 유지)
 
 	for _, f := range r.File {
 		name := filepath.ToSlash(f.Name)
@@ -280,18 +281,17 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 		}
 		rel := strings.TrimPrefix(name, prefix)
 
+		// 심볼릭 링크 무시
 		if f.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
 
-		if f.UncompressedSize64 > math.MaxInt64 {
-			return "", "", "", fmt.Errorf("zip entry too large for this platform: %d", f.UncompressedSize64)
+		entrySize := f.UncompressedSize64
+		// 항목/전체 크기 제한 (전부 uint64 비교)
+		if entrySize > uint64(maxEntryBytes) {
+			return "", "", "", fmt.Errorf("zip entry too large: %d bytes", entrySize)
 		}
-		want := int64(f.UncompressedSize64)
-		if want > maxEntryBytes {
-			return "", "", "", fmt.Errorf("zip entry too large: %d bytes", want)
-		}
-		if extracted+want > maxExtractBytes {
+		if extracted+entrySize > uint64(maxExtractBytes) {
 			return "", "", "", fmt.Errorf("zip total size exceeds limit")
 		}
 
@@ -320,7 +320,10 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 			return "", "", "", err
 		}
 
-		_, cpErr := io.CopyN(out, rc, want)
+		// entrySize만큼 정확히 복사되었는지 검증:
+		// LimitReader 에는 int64 한도(maxEntryBytes)만 전달하고,
+		// 실제 복사된 바이트 수로 entrySize와 일치 여부를 판단.
+		n, cpErr := io.Copy(out, io.LimitReader(rc, maxEntryBytes))
 		rcCloseErr := rc.Close()
 		outCloseErr := out.Close()
 		if cpErr != nil && cpErr != io.EOF {
@@ -332,7 +335,11 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 		if outCloseErr != nil {
 			return "", "", "", outCloseErr
 		}
-		extracted += want
+		if uint64(n) != entrySize {
+			return "", "", "", fmt.Errorf("zip entry size mismatch: copied=%d want=%d (%s)", n, entrySize, rel)
+		}
+
+		extracted += entrySize
 	}
 
 	_ = os.Chmod(awsBin, 0o755)
