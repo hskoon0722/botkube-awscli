@@ -144,11 +144,20 @@ func ensureFromBundle(ctx context.Context) (awsBin, glibcDir, distDir string, _ 
 	}
 	defer func() { _ = os.Remove(tmp) }()
 
-	if err := untarGzSafe(tmp, bundleRoot); err != nil {
-		return "", "", "", fmt.Errorf("extract bundle: %w", err)
-	}
-	_ = os.Chmod(awsBin, 0o755)
-	return awsBin, glibcDir, distDir, nil
+    if err := untarGzSafe(tmp, bundleRoot); err != nil {
+        return "", "", "", fmt.Errorf("extract bundle: %w", err)
+    }
+
+    _ = os.Chmod(awsBin, 0o755)
+    for _, ld := range []string{
+        filepath.Join(glibcDir, "ld-linux-x86-64.so.2"),
+        filepath.Join(glibcDir, "ld-linux-aarch64.so.1"),
+    } {
+        if _, err := os.Stat(ld); err == nil {
+            _ = os.Chmod(ld, 0o755)
+        }
+    }
+    return awsBin, glibcDir, distDir, nil
 }
 
 // tar.gz 안전 추출 (경로/사이즈 검증)
