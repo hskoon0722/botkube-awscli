@@ -95,66 +95,69 @@ jobs:
           : > plugins-index.yaml
 
           # header
-          printf "entries:\n"                                   >> plugins-index.yaml
-          printf "  - name: %s\n"            "$NAME"            >> plugins-index.yaml
-          printf "    type: %s\n"            "$TYPE"            >> plugins-index.yaml
-          printf "    description: %s\n"     "$DESC"            >> plugins-index.yaml
-          printf "    version: %s\n"         "$VERSION"         >> plugins-index.yaml
-          printf "    urls:\n"                                   >> plugins-index.yaml
+          printf 'entries:\n'                              >> plugins-index.yaml
+          printf '  - name: %s\n'        "$NAME"           >> plugins-index.yaml
+          printf '    type: %s\n'        "$TYPE"           >> plugins-index.yaml
+          printf '    description: %s\n' "$DESC"           >> plugins-index.yaml
+          printf '    version: %s\n'     "$VERSION"        >> plugins-index.yaml
+          printf '    urls:\n'                             >> plugins-index.yaml
 
           # executor binaries (conditional)
           if [[ -f dist/executor_aws_linux_amd64 ]]; then
-            printf "      - url: %s/executor_aws_linux_amd64\n" "$BASE" >> plugins-index.yaml
-            printf "        platform:\n"                         >> plugins-index.yaml
-            printf "          os: linux\n"                      >> plugins-index.yaml
-            printf "          architecture: amd64\n"            >> plugins-index.yaml
+            printf '      - url: %s/executor_aws_linux_amd64\n' "$BASE" >> plugins-index.yaml
+            printf '        platform:\n'                         >> plugins-index.yaml
+            printf '          os: linux\n'                      >> plugins-index.yaml
+            printf '          architecture: amd64\n'            >> plugins-index.yaml
           fi
           if [[ -f dist/executor_aws_linux_arm64 ]]; then
-            printf "      - url: %s/executor_aws_linux_arm64\n" "$BASE" >> plugins-index.yaml
-            printf "        platform:\n"                         >> plugins-index.yaml
-            printf "          os: linux\n"                      >> plugins-index.yaml
-            printf "          architecture: arm64\n"            >> plugins-index.yaml
+            printf '      - url: %s/executor_aws_linux_arm64\n' "$BASE" >> plugins-index.yaml
+            printf '        platform:\n'                         >> plugins-index.yaml
+            printf '          os: linux\n'                      >> plugins-index.yaml
+            printf '          architecture: arm64\n'            >> plugins-index.yaml
           fi
 
-          # jsonSchema
-          printf "    jsonSchema:\n"                            >> plugins-index.yaml
-          printf "      value: |-\\n"                           >> plugins-index.yaml
-          printf "        {\\n"                                 >> plugins-index.yaml
-          printf "          \\\"$schema\\\":\\\"http://json-schema.org/draft-04/schema#\\\",\\n" >> plugins-index.yaml
-          printf "          \\\"title\\\":\\\"aws\\\",\\n"      >> plugins-index.yaml
-          printf "          \\\"type\\\":\\\"object\\\",\\n"    >> plugins-index.yaml
-          printf "          \\\"properties\\\":{\\n"            >> plugins-index.yaml
-          printf "            \\\"defaultRegion\\\":{\\\"type\\\":\\\"string\\\"},\\n" >> plugins-index.yaml
-          printf "            \\\"prependArgs\\\":{\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"type\\\":\\\"string\\\"}},\\n" >> plugins-index.yaml
-          printf "            \\\"allowed\\\":{\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"type\\\":\\\"string\\\"}},\\n" >> plugins-index.yaml
-          printf "            \\\"env\\\":{\\\"type\\\":\\\"object\\\",\\\"additionalProperties\\\":{\\\"type\\\":\\\"string\\\"}}\\n" >> plugins-index.yaml
-          printf "          },\\n"                              >> plugins-index.yaml
-          printf "          \\\"additionalProperties\\\": false\\n" >> plugins-index.yaml
-          printf "        }\\n"                                 >> plugins-index.yaml
+          # jsonSchema (NOTE: single-quoted printf to avoid $ expansion)
+          printf '    jsonSchema:\n'                           >> plugins-index.yaml
+          printf '      value: |-\n'                           >> plugins-index.yaml
+          printf '        {\n'                                 >> plugins-index.yaml
+          printf '          "$schema":"http://json-schema.org/draft-04/schema#",\n' >> plugins-index.yaml
+          printf '          "title":"aws",\n'                  >> plugins-index.yaml
+          printf '          "type":"object",\n'                >> plugins-index.yaml
+          printf '          "properties":{\n'                  >> plugins-index.yaml
+          printf '            "defaultRegion":{"type":"string"},\n' >> plugins-index.yaml
+          printf '            "prependArgs":{"type":"array","items":{"type":"string"}},\n' >> plugins-index.yaml
+          printf '            "allowed":{"type":"array","items":{"type":"string"}},\n' >> plugins-index.yaml
+          printf '            "env":{"type":"object","additionalProperties":{"type":"string"}}\n' >> plugins-index.yaml
+          printf '          },\n'                              >> plugins-index.yaml
+          printf '          "additionalProperties": false\n'   >> plugins-index.yaml
+          printf '        }\n'                                 >> plugins-index.yaml
 
           # recommended
-          printf "    recommended: false\n"                     >> plugins-index.yaml
+          printf '    recommended: false\n'                    >> plugins-index.yaml
 
-          # dependencies (정확히 aws 바이너리만 추출하도록 내부 경로 + archive 명시)
-          printf "    dependencies:\\n"                         >> plugins-index.yaml
-          printf "      - name: aws\\n"                         >> plugins-index.yaml
-          printf "        urls:\\n"                             >> plugins-index.yaml
-          printf "          - url: %s/aws_linux_amd64.tar.gz//awscli/dist/aws?archive=tar.gz\\n" "$BASE" >> plugins-index.yaml
-          printf "            platform:\\n"                     >> plugins-index.yaml
-          printf "              os: linux\\n"                   >> plugins-index.yaml
-          printf "              architecture: amd64\\n"         >> plugins-index.yaml
-          printf "          - url: %s/aws_linux_arm64.tar.gz//awscli/dist/aws?archive=tar.gz\\n" "$BASE" >> plugins-index.yaml
-          printf "            platform:\\n"                     >> plugins-index.yaml
-          printf "              os: linux\\n"                   >> plugins-index.yaml
-          printf "              architecture: arm64\\n"         >> plugins-index.yaml
+          # dependencies (print only for existing bundles)
+          printf '    dependencies:\n'                         >> plugins-index.yaml
+          printf '      - name: aws\n'                         >> plugins-index.yaml
+          printf '        urls:\n'                             >> plugins-index.yaml
+          if [[ -f dist/aws_linux_amd64.tar.gz ]]; then
+            printf '          - url: %s/aws_linux_amd64.tar.gz//awscli/dist/aws?archive=tar.gz\n' "$BASE" >> plugins-index.yaml
+            printf '            platform:\n'                   >> plugins-index.yaml
+            printf '              os: linux\n'                 >> plugins-index.yaml
+            printf '              architecture: amd64\n'       >> plugins-index.yaml
+          fi
+          if [[ -f dist/aws_linux_arm64.tar.gz ]]; then
+            printf '          - url: %s/aws_linux_arm64.tar.gz//awscli/dist/aws?archive=tar.gz\n' "$BASE" >> plugins-index.yaml
+            printf '            platform:\n'                   >> plugins-index.yaml
+            printf '              os: linux\n'                 >> plugins-index.yaml
+            printf '              architecture: arm64\n'       >> plugins-index.yaml
+          fi
 
           # 출력 & YAML 검증
           sed -n '1,200p' plugins-index.yaml
           python3 - <<'PY'
           import yaml; yaml.safe_load(open('plugins-index.yaml','rb')); print('YAML looks valid.')
           PY
-
-
+          
       - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -32,8 +33,7 @@ const (
 )
 
 // 릴리스 번들 URL (env 로 오버라이드 가능)
-//
-//	AWSCLI_TARBALL_URL_AMD64 / AWSCLI_TARBALL_URL_ARM64
+// AWSCLI_TARBALL_URL_AMD64 / AWSCLI_TARBALL_URL_ARM64
 var defaultBundleURL = map[string]string{
 	"amd64": "https://github.com/hskoon0722/botkube-awscli/releases/download/v0.0.0-rc.3/aws_linux_amd64.tar.gz",
 	"arm64": "", // 필요시 arm64 번들 추가
@@ -91,7 +91,6 @@ func httpGetToFile(ctx context.Context, url, dst string) error {
 
 // base 밖으로 못 나가게 안전 조인
 func safeJoin(base, name string) (string, error) {
-	// tar: name 은 슬래시 기준이 들어올 수 있음
 	path := filepath.Join(base, name)
 	baseAbs, err := filepath.Abs(base)
 	if err != nil {
@@ -101,7 +100,6 @@ func safeJoin(base, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// 동일 또는 하위 디렉토리만 허용
 	if pathAbs != baseAbs && !strings.HasPrefix(pathAbs, baseAbs+string(os.PathSeparator)) {
 		return "", fmt.Errorf("unsafe path: %s", name)
 	}
@@ -149,7 +147,6 @@ func ensureFromBundle(ctx context.Context) (awsBin, glibcDir, distDir string, _ 
 	if err := untarGzSafe(tmp, bundleRoot); err != nil {
 		return "", "", "", fmt.Errorf("extract bundle: %w", err)
 	}
-	// 실행 권한 보정
 	_ = os.Chmod(awsBin, 0o755)
 	return awsBin, glibcDir, distDir, nil
 }
@@ -180,7 +177,6 @@ func untarGzSafe(src, dst string) error {
 			return err
 		}
 
-		// 심볼릭 링크/디바이스 등은 무시
 		switch h.Typeflag {
 		case tar.TypeDir, tar.TypeReg:
 		default:
@@ -199,7 +195,6 @@ func untarGzSafe(src, dst string) error {
 			continue
 		}
 
-		// 파일
 		if h.Size < 0 || h.Size > maxEntryBytes {
 			return fmt.Errorf("tar entry too large: %d bytes", h.Size)
 		}
@@ -214,7 +209,6 @@ func untarGzSafe(src, dst string) error {
 		if err != nil {
 			return err
 		}
-		// 정확히 h.Size 만큼만 복사
 		_, cpErr := io.CopyN(out, tr, h.Size)
 		clErr := out.Close()
 		if cpErr != nil && cpErr != io.EOF {
@@ -268,7 +262,7 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 	defer r.Close()
 
 	const prefix = "aws/dist/"
-	var extracted uint64
+	var extracted int64
 
 	for _, f := range r.File {
 		name := filepath.ToSlash(f.Name)
@@ -276,15 +270,20 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 			continue
 		}
 		rel := strings.TrimPrefix(name, prefix)
-		// 심링크 무시
+
 		if f.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
-		// 사이즈 제한
-		if f.UncompressedSize64 > uint64(maxEntryBytes) {
-			return "", "", "", fmt.Errorf("zip entry too large: %d bytes", f.UncompressedSize64)
+
+		// uint64 -> int64 안전 변환
+		if f.UncompressedSize64 > math.MaxInt64 {
+			return "", "", "", fmt.Errorf("zip entry too large for this platform: %d", f.UncompressedSize64)
 		}
-		if extracted+f.UncompressedSize64 > uint64(maxExtractBytes) {
+		want := int64(f.UncompressedSize64)
+		if want > maxEntryBytes {
+			return "", "", "", fmt.Errorf("zip entry too large: %d bytes", want)
+		}
+		if extracted+want > maxExtractBytes {
 			return "", "", "", fmt.Errorf("zip total size exceeds limit")
 		}
 
@@ -312,17 +311,13 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 			_ = rc.Close()
 			return "", "", "", err
 		}
-		// 제한 복사: 항목 최대크기(maxEntryBytes)만큼만 허용
-		n, cpErr := io.Copy(out, io.LimitReader(rc, maxEntryBytes))
+
+		// 정확히 want 바이트만 복사 (과도한 입력 차단)
+		_, cpErr := io.CopyN(out, rc, want)
 		rcCloseErr := rc.Close()
 		outCloseErr := out.Close()
 		if cpErr != nil && cpErr != io.EOF {
 			return "", "", "", cpErr
-		}
-		if uint64(n) != f.UncompressedSize64 {
-			return "", "", "", fmt.Errorf(
-				"zip entry size mismatch: copied=%d want=%d (%s)",
-				n, f.UncompressedSize64, rel)
 		}
 		if rcCloseErr != nil {
 			return "", "", "", rcCloseErr
@@ -330,7 +325,7 @@ func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir strin
 		if outCloseErr != nil {
 			return "", "", "", outCloseErr
 		}
-		extracted += f.UncompressedSize64
+		extracted += want
 	}
 
 	_ = os.Chmod(awsBin, 0o755)
@@ -357,7 +352,6 @@ func (e *Executor) Metadata(context.Context) (api.MetadataOutput, error) {
 			  "additionalProperties": false
 			}`),
 		},
-		// Dependencies는 비워둡니다(경로 치환 회피).
 	}, nil
 }
 
