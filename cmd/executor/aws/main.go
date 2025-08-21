@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"os"
 	"os/exec"
