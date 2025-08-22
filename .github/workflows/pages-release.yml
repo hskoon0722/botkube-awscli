@@ -1,98 +1,98 @@
-name: Deploy Botkube plugins to GitHub Pages
+name: Pages Botkube plugins
 
 on:
   push:
     tags:
       - "*"
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
   contents: read
   pages: write
   id-token: write
+  actions: read
 
-# Allow one concurrent deployment
 concurrency:
-  group: "pages"
+  group: pages
   cancel-in-progress: true
 
 jobs:
-  # Single deploy job since we're just deploying
   deploy:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      - name: Setup Pages
-        uses: actions/configure-pages@v2
-
-      - name: Set up Go
-        uses: actions/setup-go@v3
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/setup-go@v5
         with:
-          go-version-file: "go.mod"
-          cache: true
+          go-version-file: go.mod
 
-      - name: Build plugins binaries
-        uses: goreleaser/goreleaser-action@v3
+      - name: Build plugins (snapshot)
+        uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
-          args: build --rm-dist
+          args: build --clean --snapshot
 
-      - name: Generate plugins index.yaml
-        env:
-          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://${{github.repository_owner}}.github.io/${{ github.event.repository.name }}"
+      - name: Generate plugins-index.yaml
+        shell: bash
         run: |
-          go run github.com/kubeshop/botkube/hack -binaries-path "./dist"
-      - name: Release description
-        env:
-          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://${{github.repository_owner}}.github.io/${{ github.event.repository.name }}"
-        run: |
-          cat << EOF > README.md
+          set -Eeuo pipefail
+          REPO="${GITHUB_REPOSITORY#*/}"
+          BASE="https://${{ github.repository_owner }}.github.io/${REPO}"
+          NAME="aws"
+          TYPE="executor"
+          DESC="Run AWS CLI from chat."
+          VERSION="0.1.0"
 
-          Botkube Plugins **${GITHUB_REF#refs/tags/}** version are now available! :rocket:
+          {
+            printf "entries:\n"
+            printf "  - name: %s\n" "$NAME"
+            printf "    type: %s\n" "$TYPE"
+            printf "    description: %s\n" "$DESC"
+            printf "    version: %s\n" "$VERSION"
+            printf "    urls:\n"
+            if [[ -f dist/executor_aws_linux_amd64 ]]; then
+              printf "    - url: %s/executor_aws_linux_amd64\n" "$BASE"
+              printf "      platform:\n"
+              printf "        os: linux\n"
+              printf "        architecture: amd64\n"
+            fi
+            if [[ -f dist/executor_aws_linux_arm64 ]]; then
+              printf "    - url: %s/executor_aws_linux_arm64\n" "$BASE"
+              printf "      platform:\n"
+              printf "        os: linux\n"
+              printf "        architecture: arm64\n"
+            fi
+            printf "    jsonSchema:\n"
+            printf "      value: |-\n"
+          } > plugins-index.yaml
 
-          To use plugins from this release, configure Botkube with:
-          EOF
-          cat << 'EOF' >> README.md
+          cat >> plugins-index.yaml <<'JSON'
+                {
+                  "$schema":"http://json-schema.org/draft-04/schema#",
+                  "title":"aws",
+                  "type":"object",
+                  "properties":{
+                    "defaultRegion":{"type":"string"},
+                    "prependArgs":{"type":"array","items":{"type":"string"}},
+                    "allowed":{"type":"array","items":{"type":"string"}},
+                    "env":{"type":"object","additionalProperties":{"type":"string"}}
+                  },
+                  "additionalProperties": false
+                }
+          JSON
+          echo "    recommended: false" >> plugins-index.yaml
 
-          ```yaml
-          plugins:
-            repositories:
-          EOF
-          cat << EOF >> README.md
-              ${{ github.event.repository.name }}:
-                url: ${PLUGIN_DOWNLOAD_URL_BASE_PATH}/plugins-index.yaml
-          EOF
-          cat << 'EOF' >> README.md
-          ```
-          EOF
+          mkdir -p public
+          cp -f dist/executor_* public/ || true
+          cp -f plugins-index.yaml public/
+          printf '<html><body><h1>Botkube Plugins</h1><p><a href="./plugins-index.yaml">plugins-index.yaml</a></p></body></html>' > public/index.html
 
-      - name: Render Markdown
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api \
-            --method POST \
-            -H "Accept: application/vnd.github+json" \
-            /markdown \
-            -f text="$(cat ./README.md)" > index.html
-
-      - name: Publish GitHub release
-        run: |
-          mkdir public
-          mv dist/executor_* public/
-          mv dist/source_* public/
-          mv plugins-index.yaml public/
-          mv index.html public/
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v1
+      - uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v1
+      - id: deployment
+        uses: actions/deploy-pages@v4

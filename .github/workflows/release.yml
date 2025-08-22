@@ -3,66 +3,227 @@ name: Deploy Botkube plugins on GitHub Release
 on:
   push:
     tags:
-      - '*'
+      - "*"
+
+permissions:
+  contents: write
 
 jobs:
   release:
-    name: Release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
+          go-version-file: go.mod
           cache: true
 
-      - name: Install GoReleaser
-        uses: goreleaser/goreleaser-action@v3
+      # 실제로 dist/ 아래 실행파일을 빌드합니다 (스냅샷 이름: executor_aws_linux_*)
+      - name: Build plugins
+        uses: goreleaser/goreleaser-action@v6
         with:
-          install-only: true
           version: latest
+          args: build --clean --snapshot
 
-      - name: Build plugins and generate plugins index.yaml
-        env:
-          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
+      - name: Build AWS CLI bundle (amd64)
+        shell: bash
         run: |
-          make build-plugins
-          make gen-plugin-index
-      - name: Release description
-        env:
-          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
+          set -euo pipefail
+          work="$(pwd)"
+          BUNDLE_DIR="${work}/bundle_amd64"
+          rm -rf "$BUNDLE_DIR"
+          mkdir -p "$BUNDLE_DIR"/{awscli,glibc}
+
+          # 1) AWS zip -> dist만 추출
+          curl -fsSL -o /tmp/awscli.zip https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+          rm -rf /tmp/awszip
+          mkdir -p /tmp/awszip
+          unzip -q /tmp/awscli.zip -d /tmp/awszip
+          cp -a /tmp/awszip/aws/dist "$BUNDLE_DIR/awscli/"
+          AWSBIN="$BUNDLE_DIR/awscli/dist/aws"
+          chmod 0755 "$AWSBIN"
+
+          echo "== ldd on aws =="
+          ldd "$AWSBIN" || true
+
+          # 2) aws + libpython*.so 의존성 모두 수집
+          mapfile -t LIBS < <(
+            {
+              ldd "$AWSBIN" || true
+              PYLIB="$(ls "$BUNDLE_DIR/awscli/dist"/libpython*.so* 2>/dev/null | head -n1 || true)"
+              if [[ -n "${PYLIB:-}" && -f "$PYLIB" ]]; then
+                echo "== ldd on $PYLIB ==" >&2
+                ldd "$PYLIB" || true
+              fi
+            } | awk '/=>/ {print $3} !/=>/ {print $1}' | awk 'NF' | sort -u
+          )
+
+          # 3) 누락되기 쉬운 SONAME들을 이름으로 추가 탐색
+          add_by_name() {
+            local name="$1" cand=""
+            cand="$(/sbin/ldconfig -p 2>/dev/null | awk -v n="$name" '$1==n {print $NF; exit}')" || true
+            [[ -z "$cand" ]] && cand="$(ldconfig -p 2>/dev/null | awk -v n="$name" '$1==n {print $NF; exit}')" || true
+            [[ -z "$cand" ]] && cand="$(find /lib /usr/lib /usr/local/lib -name "$name" -type f 2>/dev/null | head -n1 || true)"
+            [[ -n "$cand" ]] && echo "$cand"
+          }
+          EXTRA=()
+          for n in libutil.so.1 libm.so.6 librt.so.1 libgcc_s.so.1 libstdc++.so.6; do
+            cand="$(add_by_name "$n" || true)"
+            [[ -n "$cand" ]] && EXTRA+=("$cand")
+          done
+
+          # 4) glibc 폴더로 복사(심링크 추적)
+          printf '%s\n' "${LIBS[@]}" "${EXTRA[@]}" | awk 'NF' | sort -u > /tmp/_libs.txt
+          echo "== copying libs =="
+          while IFS= read -r lib; do
+            [[ "$lib" == "linux-vdso.so.1" ]] && continue
+            [[ -e "$lib" ]] || continue
+            echo "  -> $lib"
+            cp -Lv "$lib" "$BUNDLE_DIR/glibc/" || true
+          done < /tmp/_libs.txt
+
+          # 5) 동적 로더 포함
+          LOADER="$(ldd "$AWSBIN" | awk '/ld-linux/ {print $1}' | head -n1 || true)"
+          if [[ -z "${LOADER:-}" || ! -e "$LOADER" ]]; then
+            for cand in /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2; do
+              if [[ -e "$cand" ]]; then LOADER="$cand"; break; fi
+            done
+          fi
+          if [[ -z "${LOADER:-}" || ! -e "$LOADER" ]]; then
+            echo "::error::Dynamic loader not found"; exit 1
+          fi
+          cp -Lv "$LOADER" "$BUNDLE_DIR/glibc/"
+
+          # 6) 퍼미션 보정
+          chmod 0755 "$BUNDLE_DIR/awscli/dist/aws" || true
+          for f in "$BUNDLE_DIR/glibc/"*; do
+            case "$(basename "$f")" in
+              ld-linux*|*ld-*.so*) chmod 0755 "$f" ;;
+              *)                    chmod 0644 "$f" ;;
+            esac
+          done
+
+          # 7) 패키징
+          mkdir -p dist
+          tar -C "$BUNDLE_DIR" -czf dist/aws_linux_amd64.tar.gz awscli glibc
+          echo "Created dist/aws_linux_amd64.tar.gz"
+
+
+      # 릴리즈 자산을 가리키는 index 생성 (정확한 들여쓰기 보장)
+      - name: Generate plugins-index.yaml
+        shell: bash
         run: |
+          set -Eeuo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"   # v0.1.1 -> 0.1.1
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+
+          NAME="aws"
+          TYPE="executor"
+          DESC="Run AWS CLI from chat."
+
+          : > plugins-index.yaml
+
+          # header
+          printf 'entries:\n'                              >> plugins-index.yaml
+          printf '  - name: %s\n'        "$NAME"           >> plugins-index.yaml
+          printf '    type: %s\n'        "$TYPE"           >> plugins-index.yaml
+          printf '    description: %s\n' "$DESC"           >> plugins-index.yaml
+          printf '    version: %s\n'     "$VERSION"        >> plugins-index.yaml
+          printf '    urls:\n'                             >> plugins-index.yaml
+
+          # executor binaries (conditional)
+          if [[ -f dist/executor_aws_linux_amd64 ]]; then
+            printf '      - url: %s/executor_aws_linux_amd64\n' "$BASE" >> plugins-index.yaml
+            printf '        platform:\n'                         >> plugins-index.yaml
+            printf '          os: linux\n'                      >> plugins-index.yaml
+            printf '          architecture: amd64\n'            >> plugins-index.yaml
+          fi
+          if [[ -f dist/executor_aws_linux_arm64 ]]; then
+            printf '      - url: %s/executor_aws_linux_arm64\n' "$BASE" >> plugins-index.yaml
+            printf '        platform:\n'                         >> plugins-index.yaml
+            printf '          os: linux\n'                      >> plugins-index.yaml
+            printf '          architecture: arm64\n'            >> plugins-index.yaml
+          fi
+
+          # jsonSchema (NOTE: single-quoted printf to avoid $ expansion)
+          printf '    jsonSchema:\n'                           >> plugins-index.yaml
+          printf '      value: |-\n'                           >> plugins-index.yaml
+          printf '        {\n'                                 >> plugins-index.yaml
+          printf '          "$schema":"http://json-schema.org/draft-04/schema#",\n' >> plugins-index.yaml
+          printf '          "title":"aws",\n'                  >> plugins-index.yaml
+          printf '          "type":"object",\n'                >> plugins-index.yaml
+          printf '          "properties":{\n'                  >> plugins-index.yaml
+          printf '            "defaultRegion":{"type":"string"},\n' >> plugins-index.yaml
+          printf '            "prependArgs":{"type":"array","items":{"type":"string"}},\n' >> plugins-index.yaml
+          printf '            "allowed":{"type":"array","items":{"type":"string"}},\n' >> plugins-index.yaml
+          printf '            "env":{"type":"object","additionalProperties":{"type":"string"}}\n' >> plugins-index.yaml
+          printf '          },\n'                              >> plugins-index.yaml
+          printf '          "additionalProperties": false\n'   >> plugins-index.yaml
+          printf '        }\n'                                 >> plugins-index.yaml
+
+          # recommended
+          printf '    recommended: false\n'                    >> plugins-index.yaml
+
+          # dependencies (print only for existing bundles)
+          printf '    dependencies:\n'                         >> plugins-index.yaml
+          printf '      - name: aws\n'                         >> plugins-index.yaml
+          printf '        urls:\n'                             >> plugins-index.yaml
+          if [[ -f dist/aws_linux_amd64.tar.gz ]]; then
+            printf '          - url: %s/aws_linux_amd64.tar.gz//awscli/dist/aws?archive=tar.gz\n' "$BASE" >> plugins-index.yaml
+            printf '            platform:\n'                   >> plugins-index.yaml
+            printf '              os: linux\n'                 >> plugins-index.yaml
+            printf '              architecture: amd64\n'       >> plugins-index.yaml
+          fi
+          if [[ -f dist/aws_linux_arm64.tar.gz ]]; then
+            printf '          - url: %s/aws_linux_arm64.tar.gz//awscli/dist/aws?archive=tar.gz\n' "$BASE" >> plugins-index.yaml
+            printf '            platform:\n'                   >> plugins-index.yaml
+            printf '              os: linux\n'                 >> plugins-index.yaml
+            printf '              architecture: arm64\n'       >> plugins-index.yaml
+          fi
+
+          # 출력 & YAML 검증
+          sed -n '1,200p' plugins-index.yaml
+          python3 - <<'PY'
+          import yaml; yaml.safe_load(open('plugins-index.yaml','rb')); print('YAML looks valid.')
+          PY
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+
+          # 1) release.md 생성
           cat << EOF > release.md
-
-          Botkube Plugins **${GITHUB_REF#refs/tags/}** version are now available! :rocket:
-
-          To use plugins from this release, configure Botkube with:
-          EOF
-          cat << 'EOF' >> release.md
-
+          Botkube Plugins **${TAG}** are now available!
+          To use them:
           ```yaml
           plugins:
             repositories:
-          EOF
-          cat << EOF >> release.md
               ${{ github.event.repository.name }}:
                 url: ${PLUGIN_DOWNLOAD_URL_BASE_PATH}/plugins-index.yaml
-          EOF
-          cat << 'EOF' >> release.md
           ```
           EOF
 
-      - name: Publish GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${GITHUB_REF#refs/tags/}" \
-          --notes-file release.md \
-          ./dist/source_* \
-          ./dist/executor_* \
-          ./plugins-index.yaml
+          # 2) 릴리스 생성/업데이트
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --notes-file release.md
+
+          # 3) 에셋 업로드
+          shopt -s nullglob
+          assets=(dist/executor_* dist/aws_linux_*.tar.gz plugins-index.yaml)
+          echo "Uploading assets: ${assets[*]}"
+          if ((${#assets[@]})); then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            echo "No assets to upload."
+          fi
+
+      - name: Show index URL
+        run: echo "Index URL => https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF#refs/tags/}/plugins-index.yaml"
