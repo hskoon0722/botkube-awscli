@@ -165,8 +165,8 @@ jobs:
             # 3) 누락되기 쉬운 SONAME들을 이름으로 추가 탐색
             add_by_name() {
               local name="$1" cand=""
-              cand="$(/sbin/ldconfig -p 2>/dev/null | awk -v n="$name" '$1==n {print $NF; exit}')" || true
-              [[ -z "$cand" ]] && cand="$(ldconfig -p 2>/dev/null | awk -v n="$name" '$1==n {print $NF; exit}')" || true
+              cand="$(/sbin/ldconfig -p 2>/dev/null | awk -v n="$name" "\$1==n {print \$NF; exit}")" || true
+              [[ -z "$cand" ]] && cand="$(ldconfig -p 2>/dev/null | awk -v n="$name" "\$1==n {print \$NF; exit}")" || true
               [[ -z "$cand" ]] && cand="$(find /lib /usr/lib /usr/local/lib -name "$name" -type f 2>/dev/null | head -n1 || true)"
               [[ -n "$cand" ]] && echo "$cand"
             }
