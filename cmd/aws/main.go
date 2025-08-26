@@ -1,44 +1,42 @@
 package main
 
 import (
-	"archive/tar"
-	"archive/zip"
-	"compress/gzip"
-	"context"
-	"fmt"
-	"io"
-	"math"
-	"net/http"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
-	"strings"
-	"time"
+    "archive/tar"
+    "compress/gzip"
+    "context"
+    "fmt"
+    "io"
+    "net/http"
+    "os"
+    "os/exec"
+    "path/filepath"
+    "runtime"
+    "strings"
+    "time"
 
-	"github.com/MakeNowJust/heredoc"
-	"github.com/google/shlex"
-	"github.com/hashicorp/go-plugin"
-	"github.com/kubeshop/botkube/pkg/api"
-	"github.com/kubeshop/botkube/pkg/api/executor"
-	"gopkg.in/yaml.v3"
+    "github.com/google/shlex"
+    "github.com/hashicorp/go-plugin"
+    "github.com/kubeshop/botkube/pkg/api"
+    "github.com/kubeshop/botkube/pkg/api/executor"
+    "gopkg.in/yaml.v3"
 )
 
 const (
 	pluginName = "aws"
 
-	// 디컴프 방어 한도
+    // Extraction limits for safety
 	maxEntryBytes   = int64(128 << 20) // 128MiB per entry
 	maxExtractBytes = int64(512 << 20) // 512MiB total
 )
 
-// 릴리스 번들 URL (env 로 오버라이드 가능)
+// Release bundle URLs (can be overridden via env)
 // AWSCLI_TARBALL_URL_AMD64 / AWSCLI_TARBALL_URL_ARM64
 var defaultBundleURL = map[string]string{
 	"amd64": "https://github.com/hskoon0722/botkube-awscli/releases/download/v0.0.0-rc.3/aws_linux_amd64.tar.gz",
 	"arm64": "",
 }
 
+// Config holds executor configuration.
 type Config struct {
 	DefaultRegion string            `yaml:"defaultRegion,omitempty"`
 	PrependArgs   []string          `yaml:"prependArgs,omitempty"`
@@ -46,6 +44,7 @@ type Config struct {
 	Env           map[string]string `yaml:"env,omitempty"`
 }
 
+// Executor implements the Botkube executor plugin for AWS CLI.
 type Executor struct{}
 
 func main() {
@@ -54,7 +53,7 @@ func main() {
 	})
 }
 
-// ---------- 공통 유틸 ----------
+// ---------- Utilities ----------
 
 func depsDir() (string, error) {
 	exe, err := os.Executable()
@@ -89,7 +88,7 @@ func httpGetToFile(ctx context.Context, url, dst string) error {
 	return clErr
 }
 
-// base 밖으로 못 나가게 안전 조인
+// safeJoin prevents path traversal outside base
 func safeJoin(base, name string) (string, error) {
 	path := filepath.Join(base, name)
 	baseAbs, err := filepath.Abs(base)
@@ -106,37 +105,40 @@ func safeJoin(base, name string) (string, error) {
 	return pathAbs, nil
 }
 
-// ---------- 번들(tar.gz: awscli/dist + glibc/*) 우선 ----------
+// ---------- Bundle-first (tar.gz: awscli/dist + glibc/*) ----------
 
 func ensureFromBundle(ctx context.Context) (awsBin, glibcDir, distDir string, _ error) {
-	dd, err := depsDir()
-	if err != nil {
-		return "", "", "", err
-	}
-	bundleRoot := filepath.Join(dd, "bundle")
-	distDir = filepath.Join(bundleRoot, "awscli", "dist")
-	glibcDir = filepath.Join(bundleRoot, "glibc")
-	awsBin = filepath.Join(distDir, "aws")
+    depsRoot, err := depsDir()
+    if err != nil {
+        return "", "", "", err
+    }
+    bundleRoot := filepath.Join(depsRoot, "bundle")
+    distDir = filepath.Join(bundleRoot, "awscli", "dist")
+    glibcDir = filepath.Join(bundleRoot, "glibc")
+    awsBin = filepath.Join(distDir, "aws")
 
-	// 이미 준비됨?
-	if st, err := os.Stat(awsBin); err == nil && (st.Mode().Perm()&0o111) != 0 {
-		if _, err := os.Stat(glibcDir); err == nil {
-			return awsBin, glibcDir, distDir, nil
-		}
-	}
+    // Already prepared?
+    if isExecutable(awsBin) {
+        if _, err := os.Stat(glibcDir); err == nil {
+            return awsBin, glibcDir, distDir, nil
+        }
+    }
 
 	if err := os.MkdirAll(bundleRoot, 0o755); err != nil {
 		return "", "", "", err
 	}
 
 	arch := runtime.GOARCH
-	url := os.Getenv("AWSCLI_TARBALL_URL_" + strings.ToUpper(arch))
-	if url == "" {
-		url = defaultBundleURL[arch]
-	}
-	if url == "" {
-		return "", "", "", fmt.Errorf("no bundle url configured for arch %q", arch)
-	}
+    url := os.Getenv("AWSCLI_TARBALL_URL_" + strings.ToUpper(arch))
+    if url == "" {
+        url = defaultBundleURL[arch]
+    }
+    if url == "" {
+        return "", "", "", fmt.Errorf(
+            "no bundle url configured for arch %q (set AWSCLI_TARBALL_URL_%s)",
+            arch, strings.ToUpper(arch),
+        )
+    }
 
 	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("awsbundle-%d.tar.gz", time.Now().UnixNano()))
 	if err := httpGetToFile(ctx, url, tmp); err != nil {
@@ -148,19 +150,19 @@ func ensureFromBundle(ctx context.Context) (awsBin, glibcDir, distDir string, _ 
 		return "", "", "", fmt.Errorf("extract bundle: %w", err)
 	}
 
-	_ = os.Chmod(awsBin, 0o755)
-	for _, ld := range []string{
-		filepath.Join(glibcDir, "ld-linux-x86-64.so.2"),
-		filepath.Join(glibcDir, "ld-linux-aarch64.so.1"),
-	} {
-		if _, err := os.Stat(ld); err == nil {
-			_ = os.Chmod(ld, 0o755)
-		}
-	}
-	return awsBin, glibcDir, distDir, nil
+    _ = os.Chmod(awsBin, 0o755)
+    for _, ld := range []string{
+        filepath.Join(glibcDir, "ld-linux-x86-64.so.2"),
+        filepath.Join(glibcDir, "ld-linux-aarch64.so.1"),
+    } {
+        if _, err := os.Stat(ld); err == nil {
+            _ = os.Chmod(ld, 0o755)
+        }
+    }
+    return awsBin, glibcDir, distDir, nil
 }
 
-// tar.gz 안전 추출 (경로/사이즈 검증)
+// untarGzSafe extracts tar.gz safely with size/path checks
 func untarGzSafe(src, dst string) error {
 	f, err := os.Open(src)
 	if err != nil {
@@ -230,217 +232,60 @@ func untarGzSafe(src, dst string) error {
 	}
 }
 
-// ---------- (백업) AWS 공식 zip에서 dist만 추출 ----------
-func ensureFromOfficialZip(ctx context.Context) (awsBin, glibcDir, distDir string, _ error) {
-	dd, err := depsDir()
-	if err != nil {
-		return "", "", "", err
-	}
-	distDir = filepath.Join(dd, "aws-official", "dist")
-	awsBin = filepath.Join(distDir, "aws")
+// ZIP fallback removed — only prebuilt bundles are supported.
 
-	if st, err := os.Stat(awsBin); err == nil && (st.Mode().Perm()&0o111) != 0 {
-		return awsBin, "", distDir, nil
-	}
+// ---------- Botkube Interface ----------
 
-	if err := os.MkdirAll(distDir, 0o755); err != nil {
-		return "", "", "", err
-	}
-
-	var url string
-	switch runtime.GOARCH {
-	case "amd64":
-		url = "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
-	case "arm64":
-		url = "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip"
-	default:
-		return "", "", "", fmt.Errorf("unsupported arch: %s", runtime.GOARCH)
-	}
-
-	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("awscliv2-%d.zip", time.Now().UnixNano()))
-	if err := httpGetToFile(ctx, url, tmp); err != nil {
-		return "", "", "", fmt.Errorf("download aws zip: %w", err)
-	}
-	defer func() { _ = os.Remove(tmp) }()
-
-	r, err := zip.OpenReader(tmp)
-	if err != nil {
-		return "", "", "", err
-	}
-	defer r.Close()
-
-	const prefix = "aws/dist/"
-	var extracted uint64 // 전체 추출 누적 바이트(== uint64로 유지)
-
-	for _, f := range r.File {
-		name := filepath.ToSlash(f.Name)
-		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		rel := strings.TrimPrefix(name, prefix)
-
-		// 심볼릭 링크 무시
-		if f.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
-
-		entrySize := f.UncompressedSize64
-		// 항목/전체 크기 제한 (전부 uint64 비교)
-		if entrySize > uint64(maxEntryBytes) {
-			return "", "", "", fmt.Errorf("zip entry too large: %d bytes", entrySize)
-		}
-		if extracted+entrySize > uint64(maxExtractBytes) {
-			return "", "", "", fmt.Errorf("zip total size exceeds limit")
-		}
-
-		dstPath, err := safeJoin(distDir, rel)
-		if err != nil {
-			return "", "", "", err
-		}
-
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(dstPath, 0o755); err != nil {
-				return "", "", "", err
-			}
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
-			return "", "", "", err
-		}
-
-		rc, err := f.Open()
-		if err != nil {
-			return "", "", "", err
-		}
-		out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-		if err != nil {
-			_ = rc.Close()
-			return "", "", "", err
-		}
-
-		// entrySize만큼 정확히 복사되었는지 검증:
-		// LimitReader 에는 int64 한도(maxEntryBytes)만 전달하고,
-		// 실제 복사된 바이트 수로 entrySize와 일치 여부를 판단.
-		n, cpErr := io.Copy(out, io.LimitReader(rc, maxEntryBytes))
-		rcCloseErr := rc.Close()
-		outCloseErr := out.Close()
-		if cpErr != nil && cpErr != io.EOF {
-			return "", "", "", cpErr
-		}
-		if rcCloseErr != nil {
-			return "", "", "", rcCloseErr
-		}
-		if outCloseErr != nil {
-			return "", "", "", outCloseErr
-		}
-		if entrySize > uint64(math.MaxInt64) {
-			return "", "", "", fmt.Errorf("zip entry too large for this platform: %d", entrySize)
-		}
-		if n != int64(entrySize) {
-			return "", "", "", fmt.Errorf("zip entry size mismatch: copied=%d want=%d (%s)", n, entrySize, rel)
-		}
-
-		extracted += entrySize
-	}
-
-	_ = os.Chmod(awsBin, 0o755)
-	return awsBin, "", distDir, nil
-}
-
-// ---------- Botkube 인터페이스 ----------
-
+// Metadata returns plugin metadata and schema.
 func (e *Executor) Metadata(context.Context) (api.MetadataOutput, error) {
-	return api.MetadataOutput{
-		Version:     "0.1.1",
-		Description: "Run AWS CLI from chat.",
-		JSONSchema: api.JSONSchema{
-			Value: heredoc.Doc(`{
-			  "$schema":"http://json-schema.org/draft-04/schema#",
-			  "title":"aws",
-			  "type":"object",
-			  "properties":{
-			    "defaultRegion":{"type":"string"},
-			    "prependArgs":{"type":"array","items":{"type":"string"}},
-			    "allowed":{"type":"array","items":{"type":"string"}},
-			    "env":{"type":"object","additionalProperties":{"type":"string"}}
-			  },
-			  "additionalProperties": false
-			}`),
-		},
-	}, nil
+    const jsonSchema = `{
+      "$schema":"http://json-schema.org/draft-04/schema#",
+      "title":"aws",
+      "type":"object",
+      "properties":{
+        "defaultRegion":{"type":"string"},
+        "prependArgs":{"type":"array","items":{"type":"string"}},
+        "allowed":{"type":"array","items":{"type":"string"}},
+        "env":{"type":"object","additionalProperties":{"type":"string"}}
+      },
+      "additionalProperties": false
+    }`
+    return api.MetadataOutput{
+        Version:     "0.1.1",
+        Description: "Run AWS CLI from chat.",
+        JSONSchema: api.JSONSchema{
+            Value: jsonSchema,
+        },
+    }, nil
 }
 
+// Help returns interactive help message with common examples.
 func (e *Executor) Help(context.Context) (api.Message, error) {
-	btn := api.NewMessageButtonBuilder()
+    btn := api.NewMessageButtonBuilder()
 
-	// 공통 예시(자주 쓰는 것)
-	identity := []api.Button{
-		btn.ForCommandWithDescCmd("Who am I?", "aws sts get-caller-identity"),
-		btn.ForCommandWithDescCmd("Version", "aws --version"),
-	}
-	// Compute
-	compute := []api.Button{
-		btn.ForCommandWithDescCmd("EC2 instances", "aws ec2 describe-instances"),
-		btn.ForCommandWithDescCmd("EKS clusters", "aws eks list-clusters"),
-		btn.ForCommandWithDescCmd("ECS clusters", "aws ecs list-clusters"),
-		btn.ForCommandWithDescCmd("Lambda functions", "aws lambda list-functions"),
-	}
-	// Storage
-	storage := []api.Button{
-		btn.ForCommandWithDescCmd("S3 buckets", "aws s3api list-buckets"),
-	}
-	// Database
-	database := []api.Button{
-		btn.ForCommandWithDescCmd("RDS instances", "aws rds describe-db-instances"),
-		btn.ForCommandWithDescCmd("DynamoDB tables", "aws dynamodb list-tables"),
-		btn.ForCommandWithDescCmd("ElastiCache clusters", "aws elasticache describe-cache-clusters"),
-	}
-	// Networking
-	network := []api.Button{
-		btn.ForCommandWithDescCmd("VPCs", "aws ec2 describe-vpcs"),
-		btn.ForCommandWithDescCmd("Subnets", "aws ec2 describe-subnets"),
-	}
-	updates := []api.Button{
-		btn.ForCommandWithDescCmd("EC2 RebootInstances",
-			"aws ec2 reboot-instances --instance-ids <i-xxxxxxxxxxxxxxxxx>"),
-	}
+    quick := []api.Button{
+        btn.ForCommandWithDescCmd("Who am I?", "aws sts get-caller-identity"),
+        btn.ForCommandWithDescCmd("Version", "aws --version"),
+        btn.ForCommandWithDescCmd("EC2 instances", "aws ec2 describe-instances --max-results 5"),
+        btn.ForCommandWithDescCmd("EKS clusters", "aws eks list-clusters"),
+        btn.ForCommandWithDescCmd("S3 buckets", "aws s3api list-buckets"),
+        btn.ForCommandWithDescCmd("Lambda functions", "aws lambda list-functions"),
+    }
 
-	return api.Message{
-		Sections: []api.Section{
-			{
-				Base: api.Base{
-					Header:      "Run AWS CLI",
-					Description: "예) `aws --version`, `aws sts get-caller-identity`, `aws ec2 describe-instances --max-results 5`",
-				},
-				Buttons: identity,
-			},
-			{
-				Base:    api.Base{Header: "Compute (예시)"},
-				Buttons: compute,
-			},
-			{
-				Base:    api.Base{Header: "Storage (예시)"},
-				Buttons: storage,
-			},
-			{
-				Base:    api.Base{Header: "Database (예시)"},
-				Buttons: database,
-			},
-			{
-				Base:    api.Base{Header: "Networking (예시)"},
-				Buttons: network,
-			},
-			{
-				Base: api.Base{
-					Header:      "Limited Update operations",
-					Description: "정책으로 인한 호출이 제한될 수 있습니다.",
-				},
-				Buttons: updates,
-			},
-		},
-	}, nil
+    return api.Message{
+        Sections: []api.Section{
+            {
+                Base: api.Base{
+                    Header:      "Run AWS CLI",
+                    Description: "Examples: `aws --version`, `aws sts get-caller-identity`",
+                },
+                Buttons: quick,
+            },
+        },
+    }, nil
 }
 
+// Execute runs an AWS CLI command according to provided input.
 func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (executor.ExecuteOutput, error) { //nolint:gocritic
 	var cfg Config
 	if err := mergeExecutorConfigs(in.Configs, &cfg); err != nil {
@@ -449,13 +294,13 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 
 	raw := strings.TrimSpace(in.Command)
 	lower := strings.ToLower(raw)
-	// help 라우팅
+    // Help routing
 	if lower == "" || lower == pluginName || lower == pluginName+" help" || lower == "help" {
 		h, _ := e.Help(ctx)
 		return executor.ExecuteOutput{Message: h}, nil
 	}
 
-	// 접두어 제거 + allowed 체크 + prepend 적용
+    // Normalize command, check allowed list, apply prepend args
 	cmdLine := normalizeCmd(raw)
 	if len(cfg.Allowed) > 0 && !isAllowed(cmdLine, cfg.Allowed) {
 		return msg(fmt.Sprintf("Command not allowed: %q", cmdLine)), nil
@@ -468,7 +313,7 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 		return msg("invalid arguments: " + err.Error()), nil
 	}
 
-	// AWS 바이너리/로더 준비
+    // Prepare AWS binary/loader
 	awsBin, glibcDir, distDir, err := prepareAws(ctx)
 	if err != nil {
 		return msg("failed to prepare aws cli: " + err.Error()), nil
@@ -477,7 +322,7 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 	libraryPath := buildLDPath(glibcDir, distDir)
 	env := buildEnv(cfg, libraryPath)
 
-	// 실행
+    // Execute
 	out, runErr := runAWS(ctx, ld, awsBin, libraryPath, args, env)
 	outStr := strings.TrimSpace(string(out))
 	if runErr != nil {
@@ -505,28 +350,23 @@ func normalizeCmd(raw string) string {
 }
 
 func prepareAws(ctx context.Context) (awsBin, glibcDir, distDir string, _ error) {
-	awsBin, glibcDir, distDir, err := ensureFromBundle(ctx)
-	if err == nil {
-		return awsBin, glibcDir, distDir, nil
-	}
-	// 폴백: 공식 zip (glibcDir 없음, 로더 없이 LD_LIBRARY_PATH만 사용)
-	return ensureFromOfficialZip(ctx)
+    return ensureFromBundle(ctx)
 }
 
 func resolveLoaderPath(glibcDir string) string {
-	if glibcDir == "" {
-		return ""
-	}
-	candidates := []string{
-		filepath.Join(glibcDir, "ld-linux-x86-64.so.2"),
-		filepath.Join(glibcDir, "ld-linux-aarch64.so.1"),
-	}
-	for _, p := range candidates {
-		if st, err := os.Stat(p); err == nil && (st.Mode().Perm()&0o111) != 0 {
-			return p
-		}
-	}
-	// 와일드카드 백업
+    if glibcDir == "" {
+        return ""
+    }
+    candidates := []string{
+        filepath.Join(glibcDir, "ld-linux-x86-64.so.2"),
+        filepath.Join(glibcDir, "ld-linux-aarch64.so.1"),
+    }
+    for _, p := range candidates {
+        if isExecutable(p) {
+            return p
+        }
+    }
+    // Wildcard fallback
 	if cands, _ := filepath.Glob(filepath.Join(glibcDir, "ld-linux-*.so.*")); len(cands) > 0 {
 		_ = os.Chmod(cands[0], 0o755)
 		return cands[0]
@@ -548,8 +388,8 @@ func buildLDPath(glibcDir, distDir string) string {
 }
 
 func buildEnv(cfg Config, ldPath string) []string {
-	env := os.Environ()
-	env = append(env, "HOME=/tmp", "AWS_PAGER=")
+    env := os.Environ()
+    env = append(env, "HOME=/tmp", "AWS_PAGER=")
 	if cfg.DefaultRegion != "" {
 		env = append(env, "AWS_DEFAULT_REGION="+cfg.DefaultRegion)
 	}
@@ -613,5 +453,14 @@ func isAllowed(cmd string, allow []string) bool {
 }
 
 func msg(s string) executor.ExecuteOutput {
-	return executor.ExecuteOutput{Message: api.NewPlaintextMessage(s, true)}
+    return executor.ExecuteOutput{Message: api.NewPlaintextMessage(s, true)}
+}
+
+// isExecutable reports whether a file exists and has any execute bit set.
+func isExecutable(path string) bool {
+    st, err := os.Stat(path)
+    if err != nil {
+        return false
+    }
+    return (st.Mode().Perm() & 0o111) != 0
 }
