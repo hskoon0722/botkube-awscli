@@ -159,7 +159,7 @@ jobs:
                   echo "== ldd on $PYLIB ==" >&2
                   ldd "$PYLIB" || true
                 fi
-              } | awk '/=>/ {print $3} !/=>/ {print $1}' | awk 'NF' | sort -u
+              } | awk "/=>/ {print \$3} !/=>/ {print \$1}" | awk "NF" | sort -u
             )
 
             # 3) 누락되기 쉬운 SONAME들을 이름으로 추가 탐색
@@ -187,7 +187,7 @@ jobs:
             done < /tmp/_libs_arm64.txt
 
             # 5) 동적 로더 포함 (arm64)
-            LOADER="$(ldd "$AWSBIN" | awk '/ld-linux/ {print $1}' | head -n1 || true)"
+            LOADER="$(ldd "$AWSBIN" | awk "/ld-linux/ {print \$1}" | head -n1 || true)"
             if [[ -z "${LOADER:-}" || ! -e "$LOADER" ]]; then
               for cand in /lib/ld-linux-aarch64.so.1 /lib64/ld-linux-aarch64.so.1; do
                 if [[ -e "$cand" ]]; then LOADER="$cand"; break; fi
