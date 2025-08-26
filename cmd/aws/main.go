@@ -263,13 +263,30 @@ func (e *Executor) Metadata(context.Context) (api.MetadataOutput, error) {
 func (e *Executor) Help(context.Context) (api.Message, error) {
     btn := api.NewMessageButtonBuilder()
 
-    quick := []api.Button{
+    identity := []api.Button{
         btn.ForCommandWithDescCmd("Who am I?", "aws sts get-caller-identity"),
         btn.ForCommandWithDescCmd("Version", "aws --version"),
-        btn.ForCommandWithDescCmd("EC2 instances", "aws ec2 describe-instances --max-results 5"),
+    }
+    compute := []api.Button{
+        btn.ForCommandWithDescCmd("EC2 instances", "aws ec2 describe-instances"),
         btn.ForCommandWithDescCmd("EKS clusters", "aws eks list-clusters"),
-        btn.ForCommandWithDescCmd("S3 buckets", "aws s3api list-buckets"),
+        btn.ForCommandWithDescCmd("ECS clusters", "aws ecs list-clusters"),
         btn.ForCommandWithDescCmd("Lambda functions", "aws lambda list-functions"),
+    }
+    storage := []api.Button{
+        btn.ForCommandWithDescCmd("S3 buckets", "aws s3api list-buckets"),
+    }
+    database := []api.Button{
+        btn.ForCommandWithDescCmd("RDS instances", "aws rds describe-db-instances"),
+        btn.ForCommandWithDescCmd("DynamoDB tables", "aws dynamodb list-tables"),
+        btn.ForCommandWithDescCmd("ElastiCache clusters", "aws elasticache describe-cache-clusters"),
+    }
+    network := []api.Button{
+        btn.ForCommandWithDescCmd("VPCs", "aws ec2 describe-vpcs"),
+        btn.ForCommandWithDescCmd("Subnets", "aws ec2 describe-subnets"),
+    }
+    updates := []api.Button{
+        btn.ForCommandWithDescCmd("EC2 RebootInstances (picker)", "helper reboot-ec2"),
     }
 
     return api.Message{
@@ -277,9 +294,20 @@ func (e *Executor) Help(context.Context) (api.Message, error) {
             {
                 Base: api.Base{
                     Header:      "Run AWS CLI",
-                    Description: "Examples: `aws --version`, `aws sts get-caller-identity`",
+                    Description: "Examples: `aws --version`, `aws sts get-caller-identity`, `aws ec2 describe-instances --max-results 5`",
                 },
-                Buttons: quick,
+                Buttons: identity,
+            },
+            {Base: api.Base{Header: "Compute (examples)"}, Buttons: compute},
+            {Base: api.Base{Header: "Storage (examples)"}, Buttons: storage},
+            {Base: api.Base{Header: "Database (examples)"}, Buttons: database},
+            {Base: api.Base{Header: "Networking (examples)"}, Buttons: network},
+            {
+                Base: api.Base{
+                    Header:      "Limited Update operations",
+                    Description: "Operations may be restricted by policy.",
+                },
+                Buttons: updates,
             },
         },
     }, nil
@@ -295,20 +323,59 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 	raw := strings.TrimSpace(in.Command)
 	lower := strings.ToLower(raw)
     // Help routing
-	if lower == "" || lower == pluginName || lower == pluginName+" help" || lower == "help" {
-		h, _ := e.Help(ctx)
-		return executor.ExecuteOutput{Message: h}, nil
-	}
+    if lower == "" || lower == pluginName || lower == pluginName+" help" || lower == "help" {
+        h, _ := e.Help(ctx)
+        return executor.ExecuteOutput{Message: h}, nil
+    }
+    if lower == pluginName+" help full" || lower == "help full" || lower == pluginName+" help examples" || lower == "help examples" {
+        return executor.ExecuteOutput{Message: api.NewCodeBlockMessage(fullHelpText(), true)}, nil
+    }
 
     // Normalize command, check allowed list, apply prepend args
-	cmdLine := normalizeCmd(raw)
+    cmdLine := normalizeCmd(raw)
 	if len(cfg.Allowed) > 0 && !isAllowed(cmdLine, cfg.Allowed) {
 		return msg(fmt.Sprintf("Command not allowed: %q", cmdLine)), nil
 	}
 	if len(cfg.PrependArgs) > 0 {
 		cmdLine = strings.Join(append(append([]string{}, cfg.PrependArgs...), cmdLine), " ")
 	}
-	args, err := shlex.Split(cmdLine)
+    // Special helper commands
+    if strings.HasPrefix(cmdLine, "helper reboot-ec2") {
+        // Prepare AWS binary to query instance IDs
+        awsBin, glibcDir, distDir, err := prepareAws(ctx)
+        if err != nil {
+            return msg("failed to prepare aws cli: " + err.Error()), nil
+        }
+        ld := resolveLoaderPath(glibcDir)
+        libraryPath := buildLDPath(glibcDir, distDir)
+        env := buildEnv(cfg, libraryPath)
+
+        ids, qerr := listEC2InstanceIDs(ctx, ld, awsBin, libraryPath, env)
+        if qerr != nil {
+            return msg("failed to list instances: " + qerr.Error()), nil
+        }
+        if len(ids) == 0 {
+            return msg("no instances found"), nil
+        }
+        builder := api.NewMessageButtonBuilder()
+        buttons := make([]api.Button, 0, len(ids))
+        for i, id := range ids {
+            if i >= 30 {
+                break
+            }
+            buttons = append(buttons, builder.ForCommandWithDescCmd(
+                "Reboot "+id, "aws ec2 reboot-instances --instance-ids "+id,
+            ))
+        }
+        return executor.ExecuteOutput{Message: api.Message{
+            Sections: []api.Section{{
+                Base:    api.Base{Header: "Select instance to reboot"},
+                Buttons: buttons,
+            }},
+        }}, nil
+    }
+
+    args, err := shlex.Split(cmdLine)
 	if err != nil {
 		return msg("invalid arguments: " + err.Error()), nil
 	}
@@ -412,6 +479,64 @@ func runAWS(ctx context.Context, ld, awsBin, libraryPath string, args, env []str
 	}
 	cmd.Env = env
 	return cmd.CombinedOutput()
+}
+
+// listEC2InstanceIDs returns a list of instance IDs using AWS CLI.
+func listEC2InstanceIDs(ctx context.Context, ld, awsBin, libraryPath string, env []string) ([]string, error) {
+    args := []string{
+        "ec2", "describe-instances",
+        "--query", "Reservations[].Instances[].InstanceId",
+        "--output", "text",
+    }
+    out, err := runAWS(ctx, ld, awsBin, libraryPath, args, env)
+    if err != nil {
+        return nil, fmt.Errorf("describe-instances: %w; output: %s", err, strings.TrimSpace(string(out)))
+    }
+    fields := strings.Fields(string(out))
+    unique := make(map[string]struct{}, len(fields))
+    ids := make([]string, 0, len(fields))
+    for _, f := range fields {
+        f = strings.TrimSpace(f)
+        if f == "" {
+            continue
+        }
+        if _, ok := unique[f]; ok {
+            continue
+        }
+        unique[f] = struct{}{}
+        ids = append(ids, f)
+    }
+    return ids, nil
+}
+
+// fullHelpText returns a long, example-rich help as a code block.
+func fullHelpText() string {
+    return strings.TrimSpace(`Run AWS CLI
+ex) aws --version, aws sts get-caller-identity, aws ec2 describe-instances --max-results 5
+
+@black aws sts get-caller-identity
+@black aws --version
+
+Compute
+@black aws ec2 describe-instances
+@black aws eks list-clusters
+@black aws ecs list-clusters
+@black aws lambda list-functions
+
+Storage
+@black aws s3api list-buckets
+
+Database
+@black aws rds describe-db-instances
+@black aws dynamodb list-tables
+@black aws elasticache describe-cache-clusters
+
+Networking
+@black aws ec2 describe-vpcs
+@black aws ec2 describe-subnets
+
+Limited Update operations
+@black helper reboot-ec2 (isntance-list)`)
 }
 
 func mergeExecutorConfigs(configs []*executor.Config, out *Config) error {
