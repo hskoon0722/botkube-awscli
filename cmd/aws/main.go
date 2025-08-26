@@ -1,30 +1,30 @@
 package main
 
 import (
-    "archive/tar"
-    "compress/gzip"
-    "context"
-    "fmt"
-    "io"
-    "net/http"
-    "os"
-    "os/exec"
-    "path/filepath"
-    "runtime"
-    "strings"
-    "time"
+	"archive/tar"
+	"compress/gzip"
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
 
-    "github.com/google/shlex"
-    "github.com/hashicorp/go-plugin"
-    "github.com/kubeshop/botkube/pkg/api"
-    "github.com/kubeshop/botkube/pkg/api/executor"
-    "gopkg.in/yaml.v3"
+	"github.com/google/shlex"
+	"github.com/hashicorp/go-plugin"
+	"github.com/kubeshop/botkube/pkg/api"
+	"github.com/kubeshop/botkube/pkg/api/executor"
+	"gopkg.in/yaml.v3"
 )
 
 const (
 	pluginName = "aws"
 
-    // Extraction limits for safety
+	// Extraction limits for safety
 	maxEntryBytes   = int64(128 << 20) // 128MiB per entry
 	maxExtractBytes = int64(512 << 20) // 512MiB total
 )
@@ -108,37 +108,37 @@ func safeJoin(base, name string) (string, error) {
 // ---------- Bundle-first (tar.gz: awscli/dist + glibc/*) ----------
 
 func ensureFromBundle(ctx context.Context) (awsBin, glibcDir, distDir string, _ error) {
-    depsRoot, err := depsDir()
-    if err != nil {
-        return "", "", "", err
-    }
-    bundleRoot := filepath.Join(depsRoot, "bundle")
-    distDir = filepath.Join(bundleRoot, "awscli", "dist")
-    glibcDir = filepath.Join(bundleRoot, "glibc")
-    awsBin = filepath.Join(distDir, "aws")
+	depsRoot, err := depsDir()
+	if err != nil {
+		return "", "", "", err
+	}
+	bundleRoot := filepath.Join(depsRoot, "bundle")
+	distDir = filepath.Join(bundleRoot, "awscli", "dist")
+	glibcDir = filepath.Join(bundleRoot, "glibc")
+	awsBin = filepath.Join(distDir, "aws")
 
-    // Already prepared?
-    if isExecutable(awsBin) {
-        if _, err := os.Stat(glibcDir); err == nil {
-            return awsBin, glibcDir, distDir, nil
-        }
-    }
+	// Already prepared?
+	if isExecutable(awsBin) {
+		if _, err := os.Stat(glibcDir); err == nil {
+			return awsBin, glibcDir, distDir, nil
+		}
+	}
 
 	if err := os.MkdirAll(bundleRoot, 0o755); err != nil {
 		return "", "", "", err
 	}
 
 	arch := runtime.GOARCH
-    url := os.Getenv("AWSCLI_TARBALL_URL_" + strings.ToUpper(arch))
-    if url == "" {
-        url = defaultBundleURL[arch]
-    }
-    if url == "" {
-        return "", "", "", fmt.Errorf(
-            "no bundle url configured for arch %q (set AWSCLI_TARBALL_URL_%s)",
-            arch, strings.ToUpper(arch),
-        )
-    }
+	url := os.Getenv("AWSCLI_TARBALL_URL_" + strings.ToUpper(arch))
+	if url == "" {
+		url = defaultBundleURL[arch]
+	}
+	if url == "" {
+		return "", "", "", fmt.Errorf(
+			"no bundle url configured for arch %q (set AWSCLI_TARBALL_URL_%s)",
+			arch, strings.ToUpper(arch),
+		)
+	}
 
 	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("awsbundle-%d.tar.gz", time.Now().UnixNano()))
 	if err := httpGetToFile(ctx, url, tmp); err != nil {
@@ -150,16 +150,16 @@ func ensureFromBundle(ctx context.Context) (awsBin, glibcDir, distDir string, _ 
 		return "", "", "", fmt.Errorf("extract bundle: %w", err)
 	}
 
-    _ = os.Chmod(awsBin, 0o755)
-    for _, ld := range []string{
-        filepath.Join(glibcDir, "ld-linux-x86-64.so.2"),
-        filepath.Join(glibcDir, "ld-linux-aarch64.so.1"),
-    } {
-        if _, err := os.Stat(ld); err == nil {
-            _ = os.Chmod(ld, 0o755)
-        }
-    }
-    return awsBin, glibcDir, distDir, nil
+	_ = os.Chmod(awsBin, 0o755)
+	for _, ld := range []string{
+		filepath.Join(glibcDir, "ld-linux-x86-64.so.2"),
+		filepath.Join(glibcDir, "ld-linux-aarch64.so.1"),
+	} {
+		if _, err := os.Stat(ld); err == nil {
+			_ = os.Chmod(ld, 0o755)
+		}
+	}
+	return awsBin, glibcDir, distDir, nil
 }
 
 // untarGzSafe extracts tar.gz safely with size/path checks
@@ -238,7 +238,7 @@ func untarGzSafe(src, dst string) error {
 
 // Metadata returns plugin metadata and schema.
 func (e *Executor) Metadata(context.Context) (api.MetadataOutput, error) {
-    const jsonSchema = `{
+	const jsonSchema = `{
       "$schema":"http://json-schema.org/draft-04/schema#",
       "title":"aws",
       "type":"object",
@@ -250,67 +250,67 @@ func (e *Executor) Metadata(context.Context) (api.MetadataOutput, error) {
       },
       "additionalProperties": false
     }`
-    return api.MetadataOutput{
-        Version:     "0.1.1",
-        Description: "Run AWS CLI from chat.",
-        JSONSchema: api.JSONSchema{
-            Value: jsonSchema,
-        },
-    }, nil
+	return api.MetadataOutput{
+		Version:     "0.1.1",
+		Description: "Run AWS CLI from chat.",
+		JSONSchema: api.JSONSchema{
+			Value: jsonSchema,
+		},
+	}, nil
 }
 
 // Help returns interactive help message with common examples.
 func (e *Executor) Help(context.Context) (api.Message, error) {
-    btn := api.NewMessageButtonBuilder()
+	btn := api.NewMessageButtonBuilder()
 
-    identity := []api.Button{
-        btn.ForCommandWithDescCmd("Who am I?", "aws sts get-caller-identity"),
-        btn.ForCommandWithDescCmd("Version", "aws --version"),
-    }
-    compute := []api.Button{
-        btn.ForCommandWithDescCmd("EC2 instances", "aws ec2 describe-instances"),
-        btn.ForCommandWithDescCmd("EKS clusters", "aws eks list-clusters"),
-        btn.ForCommandWithDescCmd("ECS clusters", "aws ecs list-clusters"),
-        btn.ForCommandWithDescCmd("Lambda functions", "aws lambda list-functions"),
-    }
-    storage := []api.Button{
-        btn.ForCommandWithDescCmd("S3 buckets", "aws s3api list-buckets"),
-    }
-    database := []api.Button{
-        btn.ForCommandWithDescCmd("RDS instances", "aws rds describe-db-instances"),
-        btn.ForCommandWithDescCmd("DynamoDB tables", "aws dynamodb list-tables"),
-        btn.ForCommandWithDescCmd("ElastiCache clusters", "aws elasticache describe-cache-clusters"),
-    }
-    network := []api.Button{
-        btn.ForCommandWithDescCmd("VPCs", "aws ec2 describe-vpcs"),
-        btn.ForCommandWithDescCmd("Subnets", "aws ec2 describe-subnets"),
-    }
-    updates := []api.Button{
-        btn.ForCommandWithDescCmd("EC2 RebootInstances (picker)", "helper reboot-ec2"),
-    }
+	identity := []api.Button{
+		btn.ForCommandWithDescCmd("Who am I?", "aws sts get-caller-identity"),
+		btn.ForCommandWithDescCmd("Version", "aws --version"),
+	}
+	compute := []api.Button{
+		btn.ForCommandWithDescCmd("EC2 instances", "aws ec2 describe-instances"),
+		btn.ForCommandWithDescCmd("EKS clusters", "aws eks list-clusters"),
+		btn.ForCommandWithDescCmd("ECS clusters", "aws ecs list-clusters"),
+		btn.ForCommandWithDescCmd("Lambda functions", "aws lambda list-functions"),
+	}
+	storage := []api.Button{
+		btn.ForCommandWithDescCmd("S3 buckets", "aws s3api list-buckets"),
+	}
+	database := []api.Button{
+		btn.ForCommandWithDescCmd("RDS instances", "aws rds describe-db-instances"),
+		btn.ForCommandWithDescCmd("DynamoDB tables", "aws dynamodb list-tables"),
+		btn.ForCommandWithDescCmd("ElastiCache clusters", "aws elasticache describe-cache-clusters"),
+	}
+	network := []api.Button{
+		btn.ForCommandWithDescCmd("VPCs", "aws ec2 describe-vpcs"),
+		btn.ForCommandWithDescCmd("Subnets", "aws ec2 describe-subnets"),
+	}
+	updates := []api.Button{
+		btn.ForCommandWithDescCmd("EC2 RebootInstances (picker)", "helper reboot-ec2"),
+	}
 
-    return api.Message{
-        Sections: []api.Section{
-            {
-                Base: api.Base{
-                    Header:      "Run AWS CLI",
-                    Description: "Examples: `aws --version`, `aws sts get-caller-identity`, `aws ec2 describe-instances --max-results 5`",
-                },
-                Buttons: identity,
-            },
-            {Base: api.Base{Header: "Compute (examples)"}, Buttons: compute},
-            {Base: api.Base{Header: "Storage (examples)"}, Buttons: storage},
-            {Base: api.Base{Header: "Database (examples)"}, Buttons: database},
-            {Base: api.Base{Header: "Networking (examples)"}, Buttons: network},
-            {
-                Base: api.Base{
-                    Header:      "Limited Update operations",
-                    Description: "Operations may be restricted by policy.",
-                },
-                Buttons: updates,
-            },
-        },
-    }, nil
+	return api.Message{
+		Sections: []api.Section{
+			{
+				Base: api.Base{
+					Header:      "Run AWS CLI",
+					Description: "Examples: `aws --version`, `aws sts get-caller-identity`, `aws ec2 describe-instances --max-results 5`",
+				},
+				Buttons: identity,
+			},
+			{Base: api.Base{Header: "Compute (examples)"}, Buttons: compute},
+			{Base: api.Base{Header: "Storage (examples)"}, Buttons: storage},
+			{Base: api.Base{Header: "Database (examples)"}, Buttons: database},
+			{Base: api.Base{Header: "Networking (examples)"}, Buttons: network},
+			{
+				Base: api.Base{
+					Header:      "Limited Update operations",
+					Description: "Operations may be restricted by policy.",
+				},
+				Buttons: updates,
+			},
+		},
+	}, nil
 }
 
 // Execute runs an AWS CLI command according to provided input.
@@ -322,65 +322,65 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 
 	raw := strings.TrimSpace(in.Command)
 	lower := strings.ToLower(raw)
-    // Help routing
-    if lower == "" || lower == pluginName || lower == pluginName+" help" || lower == "help" {
-        h, _ := e.Help(ctx)
-        return executor.ExecuteOutput{Message: h}, nil
-    }
-    if lower == pluginName+" help full" || lower == "help full" || lower == pluginName+" help examples" || lower == "help examples" {
-        return executor.ExecuteOutput{Message: api.NewCodeBlockMessage(fullHelpText(), true)}, nil
-    }
+	// Help routing
+	if lower == "" || lower == pluginName || lower == pluginName+" help" || lower == "help" {
+		h, _ := e.Help(ctx)
+		return executor.ExecuteOutput{Message: h}, nil
+	}
+	if lower == pluginName+" help full" || lower == "help full" || lower == pluginName+" help examples" || lower == "help examples" {
+		return executor.ExecuteOutput{Message: api.NewCodeBlockMessage(fullHelpText(), true)}, nil
+	}
 
-    // Normalize command, check allowed list, apply prepend args
-    cmdLine := normalizeCmd(raw)
+	// Normalize command, check allowed list, apply prepend args
+	cmdLine := normalizeCmd(raw)
 	if len(cfg.Allowed) > 0 && !isAllowed(cmdLine, cfg.Allowed) {
 		return msg(fmt.Sprintf("Command not allowed: %q", cmdLine)), nil
 	}
 	if len(cfg.PrependArgs) > 0 {
 		cmdLine = strings.Join(append(append([]string{}, cfg.PrependArgs...), cmdLine), " ")
 	}
-    // Special helper commands
-    if strings.HasPrefix(cmdLine, "helper reboot-ec2") {
-        // Prepare AWS binary to query instance IDs
-        awsBin, glibcDir, distDir, err := prepareAws(ctx)
-        if err != nil {
-            return msg("failed to prepare aws cli: " + err.Error()), nil
-        }
-        ld := resolveLoaderPath(glibcDir)
-        libraryPath := buildLDPath(glibcDir, distDir)
-        env := buildEnv(cfg, libraryPath)
+	// Special helper commands
+	if strings.HasPrefix(cmdLine, "helper reboot-ec2") {
+		// Prepare AWS binary to query instance IDs
+		awsBin, glibcDir, distDir, err := prepareAws(ctx)
+		if err != nil {
+			return msg("failed to prepare aws cli: " + err.Error()), nil
+		}
+		ld := resolveLoaderPath(glibcDir)
+		libraryPath := buildLDPath(glibcDir, distDir)
+		env := buildEnv(cfg, libraryPath)
 
-        ids, qerr := listEC2InstanceIDs(ctx, ld, awsBin, libraryPath, env)
-        if qerr != nil {
-            return msg("failed to list instances: " + qerr.Error()), nil
-        }
-        if len(ids) == 0 {
-            return msg("no instances found"), nil
-        }
-        builder := api.NewMessageButtonBuilder()
-        buttons := make([]api.Button, 0, len(ids))
-        for i, id := range ids {
-            if i >= 30 {
-                break
-            }
-            buttons = append(buttons, builder.ForCommandWithDescCmd(
-                "Reboot "+id, "aws ec2 reboot-instances --instance-ids "+id,
-            ))
-        }
-        return executor.ExecuteOutput{Message: api.Message{
-            Sections: []api.Section{{
-                Base:    api.Base{Header: "Select instance to reboot"},
-                Buttons: buttons,
-            }},
-        }}, nil
-    }
+		ids, qerr := listEC2InstanceIDs(ctx, ld, awsBin, libraryPath, env)
+		if qerr != nil {
+			return msg("failed to list instances: " + qerr.Error()), nil
+		}
+		if len(ids) == 0 {
+			return msg("no instances found"), nil
+		}
+		builder := api.NewMessageButtonBuilder()
+		buttons := make([]api.Button, 0, len(ids))
+		for i, id := range ids {
+			if i >= 30 {
+				break
+			}
+			buttons = append(buttons, builder.ForCommandWithDescCmd(
+				"Reboot "+id, "aws ec2 reboot-instances --instance-ids "+id,
+			))
+		}
+		return executor.ExecuteOutput{Message: api.Message{
+			Sections: []api.Section{{
+				Base:    api.Base{Header: "Select instance to reboot"},
+				Buttons: buttons,
+			}},
+		}}, nil
+	}
 
-    args, err := shlex.Split(cmdLine)
+	args, err := shlex.Split(cmdLine)
 	if err != nil {
 		return msg("invalid arguments: " + err.Error()), nil
 	}
 
-    // Prepare AWS binary/loader
+	// Prepare AWS binary/loader
 	awsBin, glibcDir, distDir, err := prepareAws(ctx)
 	if err != nil {
 		return msg("failed to prepare aws cli: " + err.Error()), nil
@@ -389,7 +389,7 @@ func (e *Executor) Execute(ctx context.Context, in executor.ExecuteInput) (execu
 	libraryPath := buildLDPath(glibcDir, distDir)
 	env := buildEnv(cfg, libraryPath)
 
-    // Execute
+	// Execute
 	out, runErr := runAWS(ctx, ld, awsBin, libraryPath, args, env)
 	outStr := strings.TrimSpace(string(out))
 	if runErr != nil {
@@ -417,23 +417,23 @@ func normalizeCmd(raw string) string {
 }
 
 func prepareAws(ctx context.Context) (awsBin, glibcDir, distDir string, _ error) {
-    return ensureFromBundle(ctx)
+	return ensureFromBundle(ctx)
 }
 
 func resolveLoaderPath(glibcDir string) string {
-    if glibcDir == "" {
-        return ""
-    }
-    candidates := []string{
-        filepath.Join(glibcDir, "ld-linux-x86-64.so.2"),
-        filepath.Join(glibcDir, "ld-linux-aarch64.so.1"),
-    }
-    for _, p := range candidates {
-        if isExecutable(p) {
-            return p
-        }
-    }
-    // Wildcard fallback
+	if glibcDir == "" {
+		return ""
+	}
+	candidates := []string{
+		filepath.Join(glibcDir, "ld-linux-x86-64.so.2"),
+		filepath.Join(glibcDir, "ld-linux-aarch64.so.1"),
+	}
+	for _, p := range candidates {
+		if isExecutable(p) {
+			return p
+		}
+	}
+	// Wildcard fallback
 	if cands, _ := filepath.Glob(filepath.Join(glibcDir, "ld-linux-*.so.*")); len(cands) > 0 {
 		_ = os.Chmod(cands[0], 0o755)
 		return cands[0]
@@ -455,8 +455,8 @@ func buildLDPath(glibcDir, distDir string) string {
 }
 
 func buildEnv(cfg Config, ldPath string) []string {
-    env := os.Environ()
-    env = append(env, "HOME=/tmp", "AWS_PAGER=")
+	env := os.Environ()
+	env = append(env, "HOME=/tmp", "AWS_PAGER=")
 	if cfg.DefaultRegion != "" {
 		env = append(env, "AWS_DEFAULT_REGION="+cfg.DefaultRegion)
 	}
@@ -483,35 +483,35 @@ func runAWS(ctx context.Context, ld, awsBin, libraryPath string, args, env []str
 
 // listEC2InstanceIDs returns a list of instance IDs using AWS CLI.
 func listEC2InstanceIDs(ctx context.Context, ld, awsBin, libraryPath string, env []string) ([]string, error) {
-    args := []string{
-        "ec2", "describe-instances",
-        "--query", "Reservations[].Instances[].InstanceId",
-        "--output", "text",
-    }
-    out, err := runAWS(ctx, ld, awsBin, libraryPath, args, env)
-    if err != nil {
-        return nil, fmt.Errorf("describe-instances: %w; output: %s", err, strings.TrimSpace(string(out)))
-    }
-    fields := strings.Fields(string(out))
-    unique := make(map[string]struct{}, len(fields))
-    ids := make([]string, 0, len(fields))
-    for _, f := range fields {
-        f = strings.TrimSpace(f)
-        if f == "" {
-            continue
-        }
-        if _, ok := unique[f]; ok {
-            continue
-        }
-        unique[f] = struct{}{}
-        ids = append(ids, f)
-    }
-    return ids, nil
+	args := []string{
+		"ec2", "describe-instances",
+		"--query", "Reservations[].Instances[].InstanceId",
+		"--output", "text",
+	}
+	out, err := runAWS(ctx, ld, awsBin, libraryPath, args, env)
+	if err != nil {
+		return nil, fmt.Errorf("describe-instances: %w; output: %s", err, strings.TrimSpace(string(out)))
+	}
+	fields := strings.Fields(string(out))
+	unique := make(map[string]struct{}, len(fields))
+	ids := make([]string, 0, len(fields))
+	for _, f := range fields {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if _, ok := unique[f]; ok {
+			continue
+		}
+		unique[f] = struct{}{}
+		ids = append(ids, f)
+	}
+	return ids, nil
 }
 
 // fullHelpText returns a long, example-rich help as a code block.
 func fullHelpText() string {
-    return strings.TrimSpace(`Run AWS CLI
+	return strings.TrimSpace(`Run AWS CLI
 ex) aws --version, aws sts get-caller-identity, aws ec2 describe-instances --max-results 5
 
 @black aws sts get-caller-identity
@@ -578,14 +578,14 @@ func isAllowed(cmd string, allow []string) bool {
 }
 
 func msg(s string) executor.ExecuteOutput {
-    return executor.ExecuteOutput{Message: api.NewPlaintextMessage(s, true)}
+	return executor.ExecuteOutput{Message: api.NewPlaintextMessage(s, true)}
 }
 
 // isExecutable reports whether a file exists and has any execute bit set.
 func isExecutable(path string) bool {
-    st, err := os.Stat(path)
-    if err != nil {
-        return false
-    }
-    return (st.Mode().Perm() & 0o111) != 0
+	st, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return (st.Mode().Perm() & 0o111) != 0
 }
