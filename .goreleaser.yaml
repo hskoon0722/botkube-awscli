@@ -6,7 +6,7 @@ before:
 
 builds:
   - id: aws
-    main: ./cmd/aws/main.go
+    main: ./cmd/aws
     binary: executor_aws_{{ .Os }}_{{ .Arch }}
     env:
       - CGO_ENABLED=0

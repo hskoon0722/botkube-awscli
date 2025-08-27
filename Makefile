@@ -60,6 +60,10 @@ fix-lint-issues: ## Automatically fix lint issues
 	golangci-lint run --fix "./..."
 .PHONY: fix-lint-issues
 
+fmt: ## Run gofmt on repository
+	gofmt -s -w ./cmd ./pkg 2>/dev/null || true
+.PHONY: fmt
+
 #############
 # Others    #
 #############
