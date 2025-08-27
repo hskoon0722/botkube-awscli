@@ -286,10 +286,11 @@ func (e *Executor) Help(context.Context) (api.Message, error) {
 		btn.ForCommandWithDescCmd("Subnets", "aws ec2 describe-subnets"),
 	}
 	updates := []api.Button{
-		btn.ForCommandWithDescCmd("EC2 RebootInstances (picker)", "helper reboot-ec2"),
+		btn.ForCommandWithDescCmd("EC2 RebootInstances (picker)", "aws ec2 reboot-instances --instance-ids <i-xxxxxxxxxxxxxxxxx>"),
 	}
 
 	return api.Message{
+		OnlyVisibleForYou: true,
 		Sections: []api.Section{
 			{
 				Base: api.Base{
@@ -536,7 +537,7 @@ Networking
 @black aws ec2 describe-subnets
 
 Limited Update operations
-@black helper reboot-ec2 (isntance-list)`)
+@black aws ec2 reboot-instances --instance-ids <i-xxxxxxxxxxxxxxxxx>`)
 }
 
 func mergeExecutorConfigs(configs []*executor.Config, out *Config) error {
