@@ -15,10 +15,7 @@ build-plugins-single: ## Builds all plugins only for current GOOS and GOARCH.
 ##############
 
 gen-plugin-index: ## Generate plugins YAML index file.
-	go run github.com/kubeshop/botkube/hack \
-	  -binaries-path "./dist" \
-	  -url-base-path "${PLUGIN_DOWNLOAD_URL_BASE_PATH}" \
-	  > plugins-index.yaml
+	bash hack/gen_plugins_index.sh
 .PHONY: gen-plugin-index
 
 ########################
