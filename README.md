@@ -4,6 +4,10 @@ Run AWS CLI from chat via a Botkube executor plugin. Examples: `aws --version`, 
 
 The plugin uses a prebuilt AWS CLI bundle (awscli/dist + glibc) as a dependency and distributes itself via a plugin repository index (`plugins-index.yaml`).
 
+By default, the executor downloads the latest bundle from GitHub Releases (no env required). To pin a specific version or use a mirror, set:
+- `AWSCLI_TARBALL_URL_AMD64`
+- `AWSCLI_TARBALL_URL_ARM64`
+
 
 ## Requirements
 
@@ -75,6 +79,9 @@ Notes:
 - `gen-plugin-index` uses `PLUGIN_DOWNLOAD_URL_BASE_PATH` to build absolute URLs. In CI this is set automatically; locally you must export it.
 - The CI script fails if no binary URLs are found to prevent uploading an invalid index.
 
+Slack setup note:
+- If you see errors like `missing_scope` or `message_not_found` in logs, ensure your Slack app has required scopes and is reinstalled: `users:read`, `chat:write` (and possibly `chat:write.public`), `channels:read`, `channels:history`, `groups:read`, `groups:history`, `im:read`, `im:history`. After updating scopes, reinstall the app to your workspace.
+
 ## Code Structure
 
 - `cmd/aws/main.go`: Entrypoint; defines `pluginName` and starts `executor.Serve` with `Executor`.
@@ -103,7 +110,7 @@ plugins:
       name: aws
       enabled: true
       config:
-        defaultRegion: ap-northeast-2
+        defaultRegion: your-default-region
         # restrict which commands are allowed (prefix match)
         allowed:
           - "sts get-caller-identity"

@@ -21,10 +21,11 @@ const (
 )
 
 // Release bundle URLs (can be overridden via env)
-// AWSCLI_TARBALL_URL_AMD64 / AWSCLI_TARBALL_URL_ARM64
+// By default, use the latest GitHub Release assets so env vars are optional.
+// You can override per-arch with AWSCLI_TARBALL_URL_AMD64 / AWSCLI_TARBALL_URL_ARM64.
 var defaultBundleURL = map[string]string{
-	"amd64": "https://github.com/hskoon0722/botkube-awscli/releases/download/v0.0.0-rc.3/aws_linux_amd64.tar.gz",
-	"arm64": "",
+	"amd64": "https://github.com/hskoon0722/botkube-awscli/releases/latest/download/aws_linux_amd64.tar.gz",
+	"arm64": "https://github.com/hskoon0722/botkube-awscli/releases/latest/download/aws_linux_arm64.tar.gz",
 }
 
 func depsDir() (string, error) {
