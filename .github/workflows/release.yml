@@ -3,66 +3,52 @@ name: Deploy Botkube plugins on GitHub Release
 on:
   push:
     tags:
-      - '*'
+      - "*"
+
+permissions:
+  contents: write
 
 jobs:
   release:
-    name: Release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
+          go-version-file: go.mod
           cache: true
 
-      - name: Install GoReleaser
-        uses: goreleaser/goreleaser-action@v3
+      # Build executor binaries into dist/
+      - name: Build plugins
+        uses: goreleaser/goreleaser-action@v6
         with:
-          install-only: true
           version: latest
+          args: build --clean --snapshot
 
-      - name: Build plugins and generate plugins index.yaml
+      # Enable arm64 emulation for Docker
+      - name: Set up QEMU for multi-arch
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build AWS CLI bundles (amd64 + arm64)
+        run: make aws-bundle-all
+
+      - name: Generate plugins-index.yaml
         env:
           PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
-        run: |
-          make build-plugins
-          make gen-plugin-index
-      - name: Release description
-        env:
-          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
-        run: |
-          cat << EOF > release.md
+        run: make gen-plugin-index
 
-          Botkube Plugins **${GITHUB_REF#refs/tags/}** version are now available! :rocket:
-
-          To use plugins from this release, configure Botkube with:
-          EOF
-          cat << 'EOF' >> release.md
-
-          ```yaml
-          plugins:
-            repositories:
-          EOF
-          cat << EOF >> release.md
-              ${{ github.event.repository.name }}:
-                url: ${PLUGIN_DOWNLOAD_URL_BASE_PATH}/plugins-index.yaml
-          EOF
-          cat << 'EOF' >> release.md
-          ```
-          EOF
-
-      - name: Publish GitHub release
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${GITHUB_REF#refs/tags/}" \
-          --notes-file release.md \
-          ./dist/source_* \
-          ./dist/executor_* \
-          ./plugins-index.yaml
+          PLUGIN_DOWNLOAD_URL_BASE_PATH: "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
+        run: make release-gh
+
+      - name: Show index URL
+        run: echo "Index URL => https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF#refs/tags/}/plugins-index.yaml"
+
