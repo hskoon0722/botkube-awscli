@@ -7,6 +7,17 @@ on:
 env:
   GOLANGCI_LINT_TIMEOUT: 5m
 jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - name: Delete deployment
+        uses: strumwolf/delete-deployment-environment@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          environment: github-pages
+          onlyRemoveDeployments: true
+
   cancel-previous-workflows:
     name: Cancel previous workflows
     runs-on: ubuntu-latest
