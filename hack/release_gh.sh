@@ -25,17 +25,47 @@ if [[ -z "${PLUGIN_DOWNLOAD_URL_BASE_PATH}" ]]; then
   PLUGIN_DOWNLOAD_URL_BASE_PATH="https://github.com/${repo_path}/releases/download/${TAG}"
 fi
 
-# 1) Prepare release notes
-cat > release.md <<EOF
+# 1) Prepare release notes from file (with env substitution if available)
+RELEASE_NOTES_FILE="${RELEASE_NOTES_FILE:-.github/release-notes.md}"
+
+# Derive repo name for templates
+REPO_NAME="${REPO_NAME:-}"
+if [[ -z "${REPO_NAME}" ]]; then
+  if [[ -n "${GITHUB_REPOSITORY:-}" ]]; then
+    REPO_NAME="${GITHUB_REPOSITORY#*/}"
+  else
+    # fallback: parse remote
+    repo_url="$(git config --get remote.origin.url | sed -E 's#^git@github.com:#https://github.com/#; s#\.git$##')"
+    REPO_NAME="${repo_url##*/}"
+  fi
+fi
+
+if [[ -f "${RELEASE_NOTES_FILE}" ]]; then
+  if command -v envsubst >/dev/null 2>&1; then
+    # Allow common vars in the template
+    export TAG PLUGIN_DOWNLOAD_URL_BASE_PATH REPO_NAME
+    envsubst < "${RELEASE_NOTES_FILE}" > release.md
+  else
+    # Minimal substitution for key vars if envsubst is missing
+    sed \
+      -e "s|\${TAG}|${TAG}|g" \
+      -e "s|\${PLUGIN_DOWNLOAD_URL_BASE_PATH}|${PLUGIN_DOWNLOAD_URL_BASE_PATH}|g" \
+      -e "s|\${REPO_NAME}|${REPO_NAME}|g" \
+      "${RELEASE_NOTES_FILE}" > release.md
+  fi
+else
+  # Fallback default
+  cat > release.md <<EOF
 Botkube Plugins ${TAG} are now available!
 To use them:
 ```yaml
 plugins:
   repositories:
-    $(basename "$(pwd)"):
+    ${REPO_NAME}:
       url: ${PLUGIN_DOWNLOAD_URL_BASE_PATH}/plugins-index.yaml
 ```
 EOF
+fi
 
 # 2) Create or update release
 if ! gh release view "${TAG}" >/dev/null 2>&1; then
@@ -55,4 +85,3 @@ else
 fi
 
 echo "Index URL => ${PLUGIN_DOWNLOAD_URL_BASE_PATH}/plugins-index.yaml"
-
