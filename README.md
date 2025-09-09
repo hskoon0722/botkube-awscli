@@ -119,12 +119,6 @@ plugins:
           - "s3api list-buckets"
         # add global args (optional)
         prependArgs: []
-        # provide credentials and other envs (example only)
-        env:
-          AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-          AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-          AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
-
 communications:
   default-group:
     socketSlack:
@@ -136,14 +130,87 @@ communications:
               - name: aws
 ```
 
+Example IAM Role with Policy
+Policy
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "Identity",
+      "Effect": "Allow",
+      "Action": ["sts:GetCallerIdentity"],
+      "Resource": "*"
+    },
+    { "Sid": "ComputeRead",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "eks:ListClusters",
+        "ecs:ListClusters",
+        "lambda:ListFunctions"
+      ],
+      "Resource": "*"
+    },
+    { "Sid": "StorageRead",
+      "Effect": "Allow",
+      "Action": ["s3:ListAllMyBuckets"],
+      "Resource": "*"
+    },
+    { "Sid": "DatabaseRead",
+      "Effect": "Allow",
+      "Action": [
+        "rds:DescribeDBInstances",
+        "dynamodb:ListTables",
+        "elasticache:DescribeCacheClusters"
+      ],
+      "Resource": "*"
+    },
+    { "Sid": "RebootOnlyTaggedInstancesInRegion",
+      "Effect": "Allow",
+      "Action": "ec2:RebootInstances",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/AllowReboot": "true"
+        }
+      }
+    }
+  ]
+}
+```
+Trust relationships
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "Federated": "arn:aws:iam::${your_aws_account_id}:oidc-provider/${your_eks_openID_connect_provider_url}"
+            },
+            "Action": "sts:AssumeRoleWithWebIdentity",
+            "Condition": {
+                "StringEquals": {
+                    "${your_eks_openID_connect_provider_url}:aud": "sts.amazonaws.com",
+                    "${your_eks_openID_connect_provider_url}:sub": "system:serviceaccount:${your_botkube_namespace}:${your_botkube_service_account_name}"
+                }
+            }
+        }
+    ]
+}
+```
+
 ```yaml
-# Alternatively, you can use ServiceAccount using IRSA instead of AWS ACCESS_KEY.
+# You can use ServiceAccount using IRSA instead of AWS ACCESS_KEY.
 serviceAccount:
   create: true
   name: "botkube"
   annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::XXXXXXX:role/XXXXXXXX
+    eks.amazonaws.com/role-arn: arn:aws:iam::${your_aws_account_id}:role/${your_role_name}
 ```
+you can refer to this url for more details : https://docs.aws.amazon.com/eks/latest/userguide/enable-iam-roles-for-service-accounts.html
 
 
 Usage examples in chat:
